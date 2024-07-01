@@ -5,9 +5,15 @@ from PIL import Image
 from tqdm import tqdm
 import pandas as pd
 from torch.utils.data import DataLoader
-
+import torch.nn.functional as F
+import torchvision
+import matplotlib as mpl
+import matplotlib.cm as cm
+import cv2
+import matplotlib.pyplot as plt
 
 from utils_flow.img_processing_utils import pad_to_same_shape
+from utils_flow.util_optical_flow import flow_to_image
 from validation.flow_evaluation.metrics_uncertainty import (compute_average_of_uncertainty_metrics, compute_aucs,
                                                             compute_uncertainty_per_image)
 from datasets.geometric_matching_datasets.ETH3D_interval import ETHInterval
@@ -103,7 +109,7 @@ def compute_pck_sparse_data(x_s, y_s, x_r, y_r, flow, pck_thresholds, dict_list_
 def run_evaluation_megadepth_or_robotcar(network, root, path_to_csv, estimate_uncertainty=False,
                                          min_size=480, stride_net=16, pre_processing=None,
                                          path_to_save=None, plot=False, plot_100=False,
-                                         plot_ind_images=False):
+                                         plot_ind_images=False,args=None, vis_attn=False):
     """
     Extracted from RANSAC-Flow (https://github.com/XiSHEN0220/RANSAC-Flow/blob/master/evaluation/evalCorr/getResults.py)
     We here recreate the same functions that they used, for fair comparison, but add additional metrics.
@@ -143,20 +149,57 @@ def run_evaluation_megadepth_or_robotcar(network, root, path_to_csv, estimate_un
         Xs, Ys, Xt, Yt = Xs[index_valid], Ys[index_valid], Xt[index_valid], Yt[index_valid]
 
         # padd the images to the same shape to be fed to network + convert them to Tensors
-        Is_original_padded_numpy, It_original_padded_numpy = pad_to_same_shape(Is_original, It_original)
+        if not vis_attn:
+            Is_original_padded_numpy, It_original_padded_numpy = pad_to_same_shape(Is_original, It_original)
+        else:
+            Is_original_padded_numpy, It_original_padded_numpy = Is_original, It_original
+
         Is = torch.Tensor(Is_original_padded_numpy).permute(2, 0, 1).unsqueeze(0)
         It = torch.Tensor(It_original_padded_numpy).permute(2, 0, 1).unsqueeze(0)
 
-        if pre_processing is not None:
+
+        if 'croco' in args.model or 'dust3r' in args.model:
+            in1k_mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
+            in1k_std =  torch.tensor([0.229, 0.224, 0.225]).view(3,1,1)
+            Is = Is.float()/255.
+            It = It.float()/255.
+
+            Is = (Is - in1k_mean) / in1k_std
+            It = (It - in1k_mean) / in1k_std
+
+            H,W = args.image_shape
+            H_32 = (H//32)*32
+            W_32 = (W//32)*32
+
+            Is = F.interpolate(Is, size=(H_32, W_32), mode='bilinear', align_corners=False).cuda()
+            It = F.interpolate(It, size=(H_32, W_32), mode='bilinear', align_corners=False).cuda()
+                    
+
+            # target_img = source_img.clone()
+
+            flow_estimated = network(Is, It)
+            if args.model=='dust3r':
+                flow_estimated = flow_est[0]['pts3d']
+                flow_estimated = flow_est[:,:,:,:2].permute(0,3,1,2)
+            if args.model=='croco_flow':
+                flow_estimated = flow_estimated[:,:2]
+                flow_pred = flow_estimated.clone()
+
             uncertainty_est = None
-            flow_estimated = pre_processing.combine_with_est_flow_field(i, Is_original_padded_numpy,
-                                                                        It_original_padded_numpy, Is, It, network)
+
+            # import ipdb;ipdb.set_trace()
+
         else:
-            if estimate_uncertainty:
-                flow_estimated, uncertainty_est = network.estimate_flow_and_confidence_map(Is, It)
-            else:
+            if pre_processing is not None:
                 uncertainty_est = None
-                flow_estimated = network.estimate_flow(Is, It)
+                flow_estimated = pre_processing.combine_with_est_flow_field(i, Is_original_padded_numpy,
+                                                                            It_original_padded_numpy, Is, It, network)
+            else:
+                if estimate_uncertainty:
+                    flow_estimated, uncertainty_est = network.estimate_flow_and_confidence_map(Is, It)
+                else:
+                    uncertainty_est = None
+                    flow_estimated = network.estimate_flow(Is, It)
 
         dict_results, dict_list_uncertainties = compute_pck_sparse_data(Xs, Ys, Xt, Yt, flow_estimated, pixelGrid,
                                                                         uncertainty_est=uncertainty_est,
@@ -165,6 +208,85 @@ def run_evaluation_megadepth_or_robotcar(network, root, path_to_csv, estimate_un
         if dict_results['aepe'] != np.nan:
             aepe_list.append(dict_results['aepe'])
         nbr_valid_corr += dict_results['nbr_valid_corr']
+
+        if vis_attn:
+            output_dir = './output_crocoflow/output_diffimg_224224_megadepth_head'
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+
+            img1 = Is.squeeze()
+            img2 = It.squeeze()
+
+            fname = os.path.join(output_dir, 'img_'+str(i))
+
+            in1k_mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1).to(img1.device)
+            in1k_std =  torch.tensor([0.229, 0.224, 0.225]).view(3,1,1).to(img1.device)
+            img1 = img1*in1k_std + in1k_mean
+            img2 = img2*in1k_std + in1k_mean
+            
+            height = torch.randint(0, H_32//16, (1,)).item()
+            width = torch.randint(0, W_32//16, (1,)).item()
+
+            img1[...,height*16:(height+1)*16,width*16:(width+1)*16] = 1
+            img_tmp = img1.clone().permute(1,2,0).cpu().numpy()
+            img_input = Image.fromarray((img_tmp*255).astype(np.uint8))
+            img_input.save(fname+'_input.png')
+
+            img2_input = img2.clone().permute(1,2,0).cpu().numpy()
+            img2_input = Image.fromarray((img2_input*255).astype(np.uint8))
+            img2_input.save(fname+'_img2.png')
+
+            resize = torchvision.transforms.Resize((H_32, W_32))
+
+            ## visualize flow
+            # flow_img = flow_to_image(flow_pred.squeeze().permute(1,2,0).cpu().numpy())
+            # flow_img = Image.fromarray(flow_img)
+            # flow_img.save(fname+'_flow.png')
+
+
+            for j in range(len(network.dec_blocks)):     # 12, 12, 768, 768
+                for k in range(12):
+                    attn_map = network.dec_blocks[j].cross_attn.attn_map
+                    # attn_map = attn_map.squeeze().mean(dim=0)
+                    attn_map = attn_map.squeeze()[k]
+                    # attn_map = attn_map.squeeze()
+                    attn_map = attn_map.reshape(H_32//16,W_32//16,-1)
+                    attn_map = attn_map[height][width].reshape(H_32//16,W_32//16)       # 24, 32
+
+                    img_tmp = img2.squeeze(dim=0).clone().permute(1,2,0).cpu().detach().numpy()
+
+                    attn_map = resize(attn_map.unsqueeze(0).unsqueeze(0)).squeeze(0).permute(1,2,0).cpu().detach().numpy()
+
+                    vmax = np.percentile(attn_map, 100)
+                    vmin = attn_map.min()
+                    normalizer = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+                    mapper = cm.ScalarMappable(norm=normalizer, cmap='jet')
+                    colormapped_im = (mapper.to_rgba(attn_map[:,:,0])[:, :, :3] * 255).astype(np.uint8)
+                    attn_map = cv2.addWeighted((img_tmp*255).astype(np.uint8), 0.6, colormapped_im, 0.4, 0)
+                    attn_map = Image.fromarray(attn_map)
+                    attn_map.save(fname+'_attn_map_'+str(j)+'_'+str(k)+'.png')
+                    # attn_map.save(fname+'_attn_map_'+str(j)+'.png')
+
+
+
+                    ## attention map vis
+                    # # attn_map =  network.dec_blocks[j].cross_attn.attn_map.squeeze().mean(dim=0).cpu().detach().numpy()
+                    # attn_map = network.dec_blocks[j].cross_attn.attn_map.squeeze()[k].cpu().detach().numpy()
+                    # # attn_map = network.dec_blocks[j].cross_attn.attn_map.squeeze().cpu().detach().numpy()
+                    # fig, ax = plt.subplots(figsize=(8, 8))
+                    # cax = ax.matshow(attn_map, cmap='viridis')
+                    # fig.colorbar(cax)
+
+                    # # ax.set_xticks(range(attn_map.shape[0]))
+                    # # ax.set_yticks(range(attn_map.shape[1]))
+                    # # plt.xlabel('Key Sequence')
+                    # # plt.ylabel('Query Sequence')
+                    # plt.title('Attention Map')
+                    # plt.savefig(fname+'_attn_map_all_'+str(j)+'_'+str(k)+'.png')
+                    # # plt.savefig(fname+'_attn_map_all_'+str(j)+'.png')
+
+                    plt.close()
+
 
         if plot_ind_images:
             plot_individual_images(path_to_save, 'image_{}'.format(i), Is, It, flow_estimated)
@@ -279,7 +401,7 @@ def run_evaluation_sintel(network, test_dataloader, device, estimate_uncertainty
     return output
 
 
-def run_evaluation_generic(network, test_dataloader, device, estimate_uncertainty=False):
+def run_evaluation_generic(network, test_dataloader, device, estimate_uncertainty=False, args=None, vis_attn=False):
     pbar = tqdm(enumerate(test_dataloader), total=len(test_dataloader))
     mean_epe_list, epe_all_list, pck_1_list, pck_3_list, pck_5_list = [], [], [], [], []
     dict_list_uncertainties = {}
@@ -289,8 +411,38 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
         flow_gt = mini_batch['flow_map'].to(device)
         mask_valid = mini_batch['correspondence_mask'].to(device)
 
+
         if estimate_uncertainty:
             flow_est, uncertainty_est = network.estimate_flow_and_confidence_map(source_img, target_img)
+        elif 'croco' in args.model or 'dust3r' in args.model:
+            in1k_mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
+            in1k_std =  torch.tensor([0.229, 0.224, 0.225]).view(3,1,1)
+            source_img = source_img.float()/255.
+            target_img = target_img.float()/255.
+
+            source_img = (source_img - in1k_mean) / in1k_std
+            target_img = (target_img - in1k_mean) / in1k_std
+
+            H,W = args.image_shape
+            H_32 = (H//32)*32
+            W_32 = (W//32)*32
+
+            source_img = F.interpolate(source_img, size=(H_32, W_32), mode='bilinear', align_corners=False).to(device)
+            target_img = F.interpolate(target_img, size=(H_32, W_32), mode='bilinear', align_corners=False).to(device)
+            
+            mask_valid = F.interpolate(mask_valid.float().unsqueeze(0), size=(H_32, W_32), mode='nearest').squeeze(0).bool().to(device)
+            
+            flow_gt = F.interpolate(flow_gt, size=(H_32, W_32), mode='bilinear', align_corners=False).to(device)
+
+            # target_img = source_img.clone()
+
+            flow_est = network(source_img, target_img)
+            if args.model=='dust3r':
+                flow_est = flow_est[0]['pts3d']
+                flow_est = flow_est[:,:,:,:2].permute(0,3,1,2)
+            if args.model=='croco_flow':
+                flow_est = flow_est[:,:2]
+                flow_pred = flow_est.clone()
         else:
             flow_est = network.estimate_flow(source_img, target_img)
 
@@ -304,6 +456,103 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
         pck_1_list.append(epe.le(1.0).float().mean().item())
         pck_3_list.append(epe.le(3.0).float().mean().item())
         pck_5_list.append(epe.le(5.0).float().mean().item())
+
+        if vis_attn:
+            output_dir = './output_crocov2/output_sameimg_224224_tmp'
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+
+            img1 = source_img.squeeze()
+            img2 = target_img.squeeze()
+            
+            img2 = img1.clone()
+
+            fname = os.path.join(output_dir, 'img_'+str(i_batch))
+
+            in1k_mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1).to(img1.device)
+            in1k_std =  torch.tensor([0.229, 0.224, 0.225]).view(3,1,1).to(img1.device)
+            img1 = img1*in1k_std + in1k_mean
+            img2 = img2*in1k_std + in1k_mean
+            
+            height = torch.randint(0, H_32//16, (1,)).item()
+            width = torch.randint(0, W_32//16, (1,)).item()
+
+            img1[...,height*16:(height+1)*16,width*16:(width+1)*16] = 1
+            img_tmp = img1.clone().permute(1,2,0).cpu().numpy()
+            img_input = Image.fromarray((img_tmp*255).astype(np.uint8))
+            img_input.save(fname+'_input.png')
+
+            img2_input = img2.clone().permute(1,2,0).cpu().numpy()
+            img2_input = Image.fromarray((img2_input*255).astype(np.uint8))
+            img2_input.save(fname+'_img2.png')
+
+            resize = torchvision.transforms.Resize((H_32, W_32))
+
+            ## visualize flow
+            # flow_img = flow_to_image(flow_pred.squeeze().permute(1,2,0).cpu().numpy())
+            # flow_img = Image.fromarray(flow_img)
+            # flow_img.save(fname+'_flow.png')
+
+
+
+
+            for j in range(len(network.dec_blocks)):     # 12, 12, 768, 768
+                # for k in range(12):
+                attn_map = network.dec_blocks[j].cross_attn.attn_map
+                attn_map = attn_map.squeeze().mean(dim=0)
+                # attn_map = attn_map.squeeze()[k]
+                # attn_map = attn_map.squeeze()
+                attn_map = attn_map.reshape(H_32//16,W_32//16,-1)
+                attn_map = attn_map[height][width].reshape(H_32//16,W_32//16)       # 24, 32
+
+                img_tmp = img2.squeeze(dim=0).clone().permute(1,2,0).cpu().detach().numpy()
+
+                attn_map = resize(attn_map.unsqueeze(0).unsqueeze(0)).squeeze(0).permute(1,2,0).cpu().detach().numpy()
+
+                vmax = np.percentile(attn_map, 100)
+                vmin = attn_map.min()
+                normalizer = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+                mapper = cm.ScalarMappable(norm=normalizer, cmap='jet')
+                colormapped_im = (mapper.to_rgba(attn_map[:,:,0])[:, :, :3] * 255).astype(np.uint8)
+                attn_map = cv2.addWeighted((img_tmp*255).astype(np.uint8), 0.6, colormapped_im, 0.4, 0)
+                attn_map = Image.fromarray(attn_map)
+                # attn_map.save(fname+'_attn_map_'+str(j)+'_'+str(k)+'.png')
+                attn_map.save(fname+'_attn_map_'+str(j)+'.png')
+
+
+
+                ## attention map vis
+                attn_map =  network.dec_blocks[j].cross_attn.attn_map.squeeze().mean(dim=0).cpu().detach().numpy()
+                # attn_map = network.dec_blocks[j].cross_attn.attn_map.squeeze()[k].cpu().detach().numpy()
+                # attn_map = network.dec_blocks[j].cross_attn.attn_map.squeeze().cpu().detach().numpy()
+                fig, ax = plt.subplots(figsize=(8, 8))
+                cax = ax.matshow(attn_map, cmap='viridis')
+                fig.colorbar(cax)
+
+                # ax.set_xticks(range(attn_map.shape[0]))
+                # ax.set_yticks(range(attn_map.shape[1]))
+    # 
+                # plt.xlabel('Key Sequence')
+                # plt.ylabel('Query Sequence')
+                plt.title('Attention Map')
+                # plt.savefig(fname+'_attn_map_all_'+str(j)+'_'+str(k)+'.png')
+                plt.savefig(fname+'_attn_map_all_'+str(j)+'.png')
+
+                plt.close()
+
+                # attn_map = network.dec_blocks[j].cross_attn.attn_map_tmp.squeeze().mean(dim=0).cpu().detach().numpy()
+                # fig, ax = plt.subplots(figsize=(8, 8))
+                # cax = ax.matshow(attn_map, cmap='viridis')
+                # fig.colorbar(cax)
+
+                # ax.set_xticks(range(attn_map.shape[0]))
+                # ax.set_yticks(range(attn_map.shape[1]))
+
+                # plt.xlabel('Key Sequence')
+                # plt.ylabel('Query Sequence')
+                # plt.title('Attention Map')
+                # plt.savefig(fname+'_attn_map_all_after'+str(j)+'.png')
+                
 
         if estimate_uncertainty:
             dict_list_uncertainties = compute_uncertainty_per_image(uncertainty_est, flow_gt, flow_est, mask_valid,

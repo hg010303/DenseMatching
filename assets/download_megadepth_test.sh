@@ -1,5 +1,5 @@
 conda activate dense_matching_env
-cd data/
+cd /home/cvlab08/projects/data/MegaDepth
 mkdir megadepth_test_set
 gdown https://drive.google.com/uc?id=1SikcOvCJ-zznOyCRJCTGtpKtTp01Jx5g
 unzip MegaDepth.zip -d megadepth_test_set

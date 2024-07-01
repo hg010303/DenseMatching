@@ -9,6 +9,10 @@ from models.GLUNet.Semantic_GLUNet import SemanticGLUNetModel
 from models.semantic_matching_models.SFNet import SFNet, SFNetWithBin
 from models.semantic_matching_models.NCNet import NCNetWithBin, ImMatchNet
 from models.semantic_matching_models.cats import CATs
+from models.croco.croco_downstream import croco_args_from_ckpt, CroCoDownstreamBinocular
+from models.croco.head_downstream import PixelwiseTaskWithDPT
+from models.croco.pos_embed import interpolate_pos_embed
+from models.dust3r.model import AsymmetricCroCo3DStereo
 
 
 def load_network(net, checkpoint_path=None, **kwargs):
@@ -40,6 +44,7 @@ model_type = ['GLUNet', 'GLUNet_interp',
               'UAWarpC',
               'SFNet', 'PWarpCSFNet_WS', 'PWarpCSFNet_SS', 'NCNet', 'PWarpCNCNet_WS', 'PWarpCNCNet_SS',
               'CATs', 'PWarpCCATs_SS', 'CATs_ft_features', 'PWarpCCATs_ft_features_SS',
+              'croco', 'croco_flow', 'dust3r'
               ]
 pre_trained_model_types = ['static', 'dynamic', 'chairs_things', 'chairs_things_ft_sintel', 'megadepth',
                            'megadepth_stage1', 'pfpascal', 'spair']
@@ -213,6 +218,39 @@ def select_model(model_name, pre_trained_model_type, arguments, global_optim_ite
         # similar to original work, we use softargmax as the inference_strategy. This is because the kp loss is the
         # EPE after applying softargmax.
         network = CATs(forward_pass_strategy='flow_prediction', inference_strategy='softargmax')
+    elif model_name == 'croco':
+        ckpt = torch.load(path_to_pre_trained_models,'cpu')
+        croco_args = croco_args_from_ckpt(ckpt)
+        croco_args['img_size'] = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
+        
+        head = PixelwiseTaskWithDPT()
+        head.num_channels = 2
+        network = CroCoDownstreamBinocular(head, **croco_args)
+        interpolate_pos_embed(network,ckpt['model'])
+        network.load_state_dict(ckpt['model'], strict=False)
+        network.eval()
+        network = network.to(device)
+
+    elif model_name == 'croco_flow':
+        ckpt = torch.load(path_to_pre_trained_models,'cpu')
+        ckpt_args = ckpt['args']
+        # ckpt_args.croco_args['img_size'] = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
+        # ckpt_args.crop = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
+
+
+        head = PixelwiseTaskWithDPT()
+        head.num_channels = 3
+        network = CroCoDownstreamBinocular(head, **ckpt_args.croco_args)
+        # interpolate_pos_embed(network,ckpt['model'])
+        network.load_state_dict(ckpt['model']) 
+        network.eval()
+        network=network.to(device)
+    
+    elif model_name == 'dust3r':
+        # network = AsymmetricCroCo3DStereo(patch_embed_cls='ManyAR_PatchEmbed', img_size=(arguments.image_shape[0],arguments.image_shape[1]))
+        network = AsymmetricCroCo3DStereo.from_pretrained(path_to_pre_trained_models).to(device)
+        network.eval()
+    
     else:
         raise NotImplementedError('the model that you chose does not exist: {}'.format(model_name))
 
@@ -230,9 +268,10 @@ def select_model(model_name, pre_trained_model_type, arguments, global_optim_ite
     if not os.path.exists(checkpoint_fname):
         raise ValueError('The checkpoint that you chose does not exist, {}'.format(checkpoint_fname))
 
-    network = load_network(network, checkpoint_path=checkpoint_fname)
-    network.eval()
-    network = network.to(device)
+    if 'croco' not in model_name or 'dust3r' not in model_name:
+        network = load_network(network, checkpoint_path=checkpoint_fname)
+        network.eval()
+        network = network.to(device)
 
     # define inference arguments
     if arguments.network_type == 'PDCNet' or arguments.network_type == 'PDCNet_plus':
