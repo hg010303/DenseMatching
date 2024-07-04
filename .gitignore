@@ -9,3 +9,5 @@
 admin/local.py
 output*/
 *.png
+*.so
+*build*
