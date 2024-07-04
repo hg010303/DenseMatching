@@ -210,7 +210,7 @@ def run_evaluation_megadepth_or_robotcar(network, root, path_to_csv, estimate_un
         nbr_valid_corr += dict_results['nbr_valid_corr']
 
         if vis_attn:
-            output_dir = './output_crocoflow/output_diffimg_224224_megadepth_head'
+            output_dir = './output_crocov2/output_diffimg_224224_zero_megadepth_head'
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir)
 
@@ -250,6 +250,7 @@ def run_evaluation_megadepth_or_robotcar(network, root, path_to_csv, estimate_un
                     # attn_map = attn_map.squeeze().mean(dim=0)
                     attn_map = attn_map.squeeze()[k]
                     # attn_map = attn_map.squeeze()
+                    # attn_map[:,0] =0
                     attn_map = attn_map.reshape(H_32//16,W_32//16,-1)
                     attn_map = attn_map[height][width].reshape(H_32//16,W_32//16)       # 24, 32
 
@@ -458,14 +459,14 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
         pck_5_list.append(epe.le(5.0).float().mean().item())
 
         if vis_attn:
-            output_dir = './output_crocov2/output_sameimg_224224_tmp'
+            output_dir = './output_crocov2/output_diffimg_512512'
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir)
 
             img1 = source_img.squeeze()
             img2 = target_img.squeeze()
             
-            img2 = img1.clone()
+            # img2 = img1.clone()
 
             fname = os.path.join(output_dir, 'img_'+str(i_batch))
 
@@ -502,6 +503,7 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
                 attn_map = attn_map.squeeze().mean(dim=0)
                 # attn_map = attn_map.squeeze()[k]
                 # attn_map = attn_map.squeeze()
+                # attn_map[:,0] =0 
                 attn_map = attn_map.reshape(H_32//16,W_32//16,-1)
                 attn_map = attn_map[height][width].reshape(H_32//16,W_32//16)       # 24, 32
 
@@ -521,29 +523,29 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
 
 
 
-                ## attention map vis
-                attn_map =  network.dec_blocks[j].cross_attn.attn_map.squeeze().mean(dim=0).cpu().detach().numpy()
-                # attn_map = network.dec_blocks[j].cross_attn.attn_map.squeeze()[k].cpu().detach().numpy()
-                # attn_map = network.dec_blocks[j].cross_attn.attn_map.squeeze().cpu().detach().numpy()
-                fig, ax = plt.subplots(figsize=(8, 8))
-                cax = ax.matshow(attn_map, cmap='viridis')
-                fig.colorbar(cax)
+    #             ## attention map vis
+    #             attn_map =  network.dec_blocks[j].cross_attn.attn_map.squeeze().mean(dim=0).cpu().detach().numpy()
+    #             # attn_map = network.dec_blocks[j].cross_attn.attn_map.squeeze()[k].cpu().detach().numpy()
+    #             # attn_map = network.dec_blocks[j].cross_attn.attn_map.squeeze().cpu().detach().numpy()
+    #             fig, ax = plt.subplots(figsize=(8, 8))
+    #             cax = ax.matshow(attn_map, cmap='viridis')
+    #             fig.colorbar(cax)
 
-                # ax.set_xticks(range(attn_map.shape[0]))
-                # ax.set_yticks(range(attn_map.shape[1]))
-    # 
-                # plt.xlabel('Key Sequence')
-                # plt.ylabel('Query Sequence')
-                plt.title('Attention Map')
-                # plt.savefig(fname+'_attn_map_all_'+str(j)+'_'+str(k)+'.png')
-                plt.savefig(fname+'_attn_map_all_'+str(j)+'.png')
+    #             # ax.set_xticks(range(attn_map.shape[0]))
+    #             # ax.set_yticks(range(attn_map.shape[1]))
+    # # 
+    #             # plt.xlabel('Key Sequence')
+    #             # plt.ylabel('Query Sequence')
+    #             plt.title('Attention Map')
+    #             # plt.savefig(fname+'_attn_map_all_'+str(j)+'_'+str(k)+'.png')
+    #             plt.savefig(fname+'_attn_map_all_'+str(j)+'.png')
 
-                plt.close()
+    #             plt.close()
 
-                # attn_map = network.dec_blocks[j].cross_attn.attn_map_tmp.squeeze().mean(dim=0).cpu().detach().numpy()
-                # fig, ax = plt.subplots(figsize=(8, 8))
-                # cax = ax.matshow(attn_map, cmap='viridis')
-                # fig.colorbar(cax)
+    #             # attn_map = network.dec_blocks[j].cross_attn.attn_map_tmp.squeeze().mean(dim=0).cpu().detach().numpy()
+    #             # fig, ax = plt.subplots(figsize=(8, 8))
+    #             # cax = ax.matshow(attn_map, cmap='viridis')
+    #             # fig.colorbar(cax)
 
                 # ax.set_xticks(range(attn_map.shape[0]))
                 # ax.set_yticks(range(attn_map.shape[1]))

@@ -234,14 +234,14 @@ def select_model(model_name, pre_trained_model_type, arguments, global_optim_ite
     elif model_name == 'croco_flow':
         ckpt = torch.load(path_to_pre_trained_models,'cpu')
         ckpt_args = ckpt['args']
-        # ckpt_args.croco_args['img_size'] = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
-        # ckpt_args.crop = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
+        ckpt_args.croco_args['img_size'] = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
+        ckpt_args.crop = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
 
 
         head = PixelwiseTaskWithDPT()
         head.num_channels = 3
         network = CroCoDownstreamBinocular(head, **ckpt_args.croco_args)
-        # interpolate_pos_embed(network,ckpt['model'])
+        interpolate_pos_embed(network,ckpt['model'])
         network.load_state_dict(ckpt['model']) 
         network.eval()
         network=network.to(device)
