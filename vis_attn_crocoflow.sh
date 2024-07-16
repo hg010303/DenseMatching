@@ -1,5 +1,5 @@
 CUDA_VISIBLE_DEVICES=0 python -u vis_attn.py \
- --dataset megadepth \
+ --dataset hpatches \
  --model croco_flow \
  --pre_trained_models croco_flow \
  --path_to_pre_trained_models /home/cvlab08/projects/hg/croco/stereoflow_models/crocoflow.pth \

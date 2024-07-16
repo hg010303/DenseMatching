@@ -180,16 +180,15 @@ class CrossAttention(nn.Module):
             k = self.rope(k, kpos)
             
         attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn_tmp = attn.clone().detach()  
         attn = attn.softmax(dim=-1)
 
-
-        self.attn_map = attn
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B, Nq, C)
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x
+        return x,attn_tmp
 
 class DecoderBlock(nn.Module):
 
@@ -209,9 +208,11 @@ class DecoderBlock(nn.Module):
     def forward(self, x, y, xpos, ypos):
         x = x + self.drop_path(self.attn(self.norm1(x), xpos))
         y_ = self.norm_y(y)
-        x = x + self.drop_path(self.cross_attn(self.norm2(x), y_, y_, xpos, ypos))
+        # x = x + self.drop_path(self.cross_attn(self.norm2(x), y_, y_, xpos, ypos))
+        x_tmp, attn_map = self.cross_attn(self.norm2(x), y_, y_, xpos, ypos)
+        x = x + self.drop_path(x_tmp)
         x = x + self.drop_path(self.mlp(self.norm3(x)))
-        return x, y
+        return x, y, attn_map
         
         
 # patch embedding

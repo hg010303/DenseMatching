@@ -104,19 +104,21 @@ class CroCoDownstreamBinocular(CroCoNet):
         if return_all_blocks:
             out,out2 = list(map(list, zip(*[o.chunk(2, dim=0) for o in out])))
             out2 = out2[-1]
+            out_all = out2
         else:
             out,out2 = out.chunk(2, dim=0)
+            out_all = None
         pos,pos2 = pos.chunk(2, dim=0)            
-        return out, out2, pos, pos2
+        return out, out2, pos, pos2, out_all
 
     def forward(self, img1, img2):
         B, C, H, W = img1.size()
         img_info = {'height': H, 'width': W}
         return_all_blocks = hasattr(self.head, 'return_all_blocks') and self.head.return_all_blocks
-        out, out2, pos, pos2 = self.encode_image_pairs(img1, img2, return_all_blocks=return_all_blocks)
+        out, out2, pos, pos2, out2_all = self.encode_image_pairs(img1, img2, return_all_blocks=return_all_blocks)
         if return_all_blocks:
             decout = self._decoder(out[-1], pos, None, out2, pos2, return_all_blocks=return_all_blocks)
             decout = out+decout
         else:
             decout = self._decoder(out, pos, None, out2, pos2, return_all_blocks=return_all_blocks)
-        return self.head(decout, img_info)
+        return self.head(decout, img_info), out, out2_all

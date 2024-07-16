@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import jpeg4py
 from packaging import version
+import torch.nn.functional as F
 
 
 from utils_flow.flow_and_mapping_operations import get_gt_correspondence_mask, convert_flow_to_mapping
@@ -30,7 +31,7 @@ class ListDataset(data.Dataset):
     """General Dataset creation class"""
     def __init__(self, root, path_list, source_image_transform=None, target_image_transform=None, flow_transform=None,
                  co_transform=None, loader=default_loader, load_valid_mask=False, load_size=False,
-                 load_occlusion_mask=False, get_mapping=False, compute_mask_zero_borders=False):
+                 load_occlusion_mask=False, get_mapping=False, compute_mask_zero_borders=False, img_size = None):
         """
 
         Args:
@@ -77,6 +78,7 @@ class ListDataset(data.Dataset):
         self.load_occlusion_mask = load_occlusion_mask
         self.get_mapping = get_mapping
         self.mask_zero_borders = compute_mask_zero_borders
+        self.img_size = img_size
 
     def __getitem__(self, index):
         """
@@ -147,6 +149,17 @@ class ListDataset(data.Dataset):
             inputs[1] = self.target_image_transform(inputs[1])
         if self.flow_transform is not None:
             flow = self.flow_transform(flow)
+            
+        if self.img_size is not None:
+            inputs[0] = F.interpolate(inputs[0].unsqueeze(0), size=self.img_size, mode='bilinear', align_corners=False).squeeze(0)
+            inputs[1] = F.interpolate(inputs[1].unsqueeze(0), size=self.img_size, mode='bilinear', align_corners=False).squeeze(0)
+            flow_h,flow_w = flow.shape[1],flow.shape[2]
+            flow = F.interpolate(flow.unsqueeze(0), size=self.img_size, mode='bilinear', align_corners=False).squeeze(0)
+            flow[0] *= float(self.img_size[0]) / float(flow_h)
+            flow[1] *= float(self.img_size[1]) / float(flow_w)
+            mask = F.interpolate(torch.tensor(mask).unsqueeze(0).unsqueeze(0).float(), size=self.img_size, mode='nearest').squeeze(0).squeeze(0).byte().numpy()
+            source_size = self.img_size
+        
 
         output = {'source_image': inputs[0],
                   'target_image': inputs[1],

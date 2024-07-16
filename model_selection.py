@@ -13,7 +13,7 @@ from models.croco.croco_downstream import croco_args_from_ckpt, CroCoDownstreamB
 from models.croco.head_downstream import PixelwiseTaskWithDPT
 from models.croco.pos_embed import interpolate_pos_embed
 from models.dust3r.model import AsymmetricCroCo3DStereo
-
+from models.croco.croco import CroCoNet
 
 def load_network(net, checkpoint_path=None, **kwargs):
     """Loads a network checkpoint file.
@@ -222,14 +222,10 @@ def select_model(model_name, pre_trained_model_type, arguments, global_optim_ite
         ckpt = torch.load(path_to_pre_trained_models,'cpu')
         croco_args = croco_args_from_ckpt(ckpt)
         croco_args['img_size'] = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
-        
-        head = PixelwiseTaskWithDPT()
-        head.num_channels = 2
-        network = CroCoDownstreamBinocular(head, **croco_args)
-        interpolate_pos_embed(network,ckpt['model'])
+        croco_args['cost_agg'] = True
+        croco_args['three']=False
+        network = CroCoNet(**croco_args)
         network.load_state_dict(ckpt['model'], strict=False)
-        network.eval()
-        network = network.to(device)
 
     elif model_name == 'croco_flow':
         ckpt = torch.load(path_to_pre_trained_models,'cpu')

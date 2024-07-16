@@ -210,7 +210,7 @@ def run_evaluation_megadepth_or_robotcar(network, root, path_to_csv, estimate_un
         nbr_valid_corr += dict_results['nbr_valid_corr']
 
         if vis_attn:
-            output_dir = './output_crocov2/output_diffimg_224224_zero_megadepth_head'
+            output_dir = './output_crocov2/output_diffimg_224224_tmp'
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir)
 
@@ -245,28 +245,28 @@ def run_evaluation_megadepth_or_robotcar(network, root, path_to_csv, estimate_un
 
 
             for j in range(len(network.dec_blocks)):     # 12, 12, 768, 768
-                for k in range(12):
-                    attn_map = network.dec_blocks[j].cross_attn.attn_map
-                    # attn_map = attn_map.squeeze().mean(dim=0)
-                    attn_map = attn_map.squeeze()[k]
-                    # attn_map = attn_map.squeeze()
-                    # attn_map[:,0] =0
-                    attn_map = attn_map.reshape(H_32//16,W_32//16,-1)
-                    attn_map = attn_map[height][width].reshape(H_32//16,W_32//16)       # 24, 32
+                # for k in range(12):
+                attn_map = network.dec_blocks[j].cross_attn.attn_map
+                attn_map = attn_map.squeeze().mean(dim=0)
+                # attn_map = attn_map.squeeze()[k]
+                # attn_map = attn_map.squeeze()
+                # attn_map[:,0] =0
+                attn_map = attn_map.reshape(H_32//16,W_32//16,-1)
+                attn_map = attn_map[height][width].reshape(H_32//16,W_32//16)       # 24, 32
 
-                    img_tmp = img2.squeeze(dim=0).clone().permute(1,2,0).cpu().detach().numpy()
+                img_tmp = img2.squeeze(dim=0).clone().permute(1,2,0).cpu().detach().numpy()
 
-                    attn_map = resize(attn_map.unsqueeze(0).unsqueeze(0)).squeeze(0).permute(1,2,0).cpu().detach().numpy()
+                attn_map = resize(attn_map.unsqueeze(0).unsqueeze(0)).squeeze(0).permute(1,2,0).cpu().detach().numpy()
 
-                    vmax = np.percentile(attn_map, 100)
-                    vmin = attn_map.min()
-                    normalizer = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
-                    mapper = cm.ScalarMappable(norm=normalizer, cmap='jet')
-                    colormapped_im = (mapper.to_rgba(attn_map[:,:,0])[:, :, :3] * 255).astype(np.uint8)
-                    attn_map = cv2.addWeighted((img_tmp*255).astype(np.uint8), 0.6, colormapped_im, 0.4, 0)
-                    attn_map = Image.fromarray(attn_map)
-                    attn_map.save(fname+'_attn_map_'+str(j)+'_'+str(k)+'.png')
-                    # attn_map.save(fname+'_attn_map_'+str(j)+'.png')
+                vmax = np.percentile(attn_map, 100)
+                vmin = attn_map.min()
+                normalizer = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+                mapper = cm.ScalarMappable(norm=normalizer, cmap='jet')
+                colormapped_im = (mapper.to_rgba(attn_map[:,:,0])[:, :, :3] * 255).astype(np.uint8)
+                attn_map = cv2.addWeighted((img_tmp*255).astype(np.uint8), 0.6, colormapped_im, 0.4, 0)
+                attn_map = Image.fromarray(attn_map)
+                # attn_map.save(fname+'_attn_map_'+str(j)+'_'+str(k)+'.png')
+                attn_map.save(fname+'_attn_map_'+str(j)+'.png')
 
 
 
@@ -286,7 +286,7 @@ def run_evaluation_megadepth_or_robotcar(network, root, path_to_csv, estimate_un
                     # plt.savefig(fname+'_attn_map_all_'+str(j)+'_'+str(k)+'.png')
                     # # plt.savefig(fname+'_attn_map_all_'+str(j)+'.png')
 
-                    plt.close()
+                plt.close()
 
 
         if plot_ind_images:
@@ -434,34 +434,38 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
             mask_valid = F.interpolate(mask_valid.float().unsqueeze(0), size=(H_32, W_32), mode='nearest').squeeze(0).bool().to(device)
             
             flow_gt = F.interpolate(flow_gt, size=(H_32, W_32), mode='bilinear', align_corners=False).to(device)
+            
 
-            # target_img = source_img.clone()
 
             flow_est = network(source_img, target_img)
+            
             if args.model=='dust3r':
                 flow_est = flow_est[0]['pts3d']
                 flow_est = flow_est[:,:,:,:2].permute(0,3,1,2)
             if args.model=='croco_flow':
-                flow_est = flow_est[:,:2]
-                flow_pred = flow_est.clone()
+                # flow_est = flow_est[:,:2]
+                # flow_pred = flow_est.clone()
+                pass
         else:
             flow_est = network.estimate_flow(source_img, target_img)
 
-        flow_est = flow_est.permute(0, 2, 3, 1)[mask_valid]
-        flow_gt = flow_gt.permute(0, 2, 3, 1)[mask_valid]
+        # flow_est = flow_est.permute(0, 2, 3, 1)[mask_valid]
+        # flow_gt = flow_gt.permute(0, 2, 3, 1)[mask_valid]
 
-        epe = torch.sum((flow_est - flow_gt) ** 2, dim=1).sqrt()
+        # epe = torch.sum((flow_est - flow_gt) ** 2, dim=1).sqrt()
 
-        epe_all_list.append(epe.view(-1).cpu().numpy())
-        mean_epe_list.append(epe.mean().item())
-        pck_1_list.append(epe.le(1.0).float().mean().item())
-        pck_3_list.append(epe.le(3.0).float().mean().item())
-        pck_5_list.append(epe.le(5.0).float().mean().item())
+        # epe_all_list.append(epe.view(-1).cpu().numpy())
+        # mean_epe_list.append(epe.mean().item())
+        # pck_1_list.append(epe.le(1.0).float().mean().item())
+        # pck_3_list.append(epe.le(3.0).float().mean().item())
+        # pck_5_list.append(epe.le(5.0).float().mean().item())
 
         if vis_attn:
-            output_dir = './output_crocov2/output_diffimg_512512'
+            output_dir = './output_crocov2/output_diffimg_224224_tmp'
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir)
+
+
 
             img1 = source_img.squeeze()
             img2 = target_img.squeeze()
@@ -489,21 +493,21 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
 
             resize = torchvision.transforms.Resize((H_32, W_32))
 
-            ## visualize flow
-            # flow_img = flow_to_image(flow_pred.squeeze().permute(1,2,0).cpu().numpy())
-            # flow_img = Image.fromarray(flow_img)
-            # flow_img.save(fname+'_flow.png')
-
-
-
+            # ## visualize flow
+            # # flow_img = flow_to_image(flow_pred.squeeze().permute(1,2,0).cpu().numpy())
+            # # flow_img = Image.fromarray(flow_img)
+            # # flow_img.save(fname+'_flow.png')
 
             for j in range(len(network.dec_blocks)):     # 12, 12, 768, 768
                 # for k in range(12):
-                attn_map = network.dec_blocks[j].cross_attn.attn_map
-                attn_map = attn_map.squeeze().mean(dim=0)
+                attn_map = network.attn_map[j]
+                # attn_map = network.dec_blocks[j].cross_attn.attn_map
+                attn_map = attn_map.squeeze()
+                
                 # attn_map = attn_map.squeeze()[k]
                 # attn_map = attn_map.squeeze()
-                # attn_map[:,0] =0 
+                attn_map[:,0] =0 
+                # attn_map = corr_map
                 attn_map = attn_map.reshape(H_32//16,W_32//16,-1)
                 attn_map = attn_map[height][width].reshape(H_32//16,W_32//16)       # 24, 32
 
@@ -518,8 +522,35 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
                 colormapped_im = (mapper.to_rgba(attn_map[:,:,0])[:, :, :3] * 255).astype(np.uint8)
                 attn_map = cv2.addWeighted((img_tmp*255).astype(np.uint8), 0.6, colormapped_im, 0.4, 0)
                 attn_map = Image.fromarray(attn_map)
-                # attn_map.save(fname+'_attn_map_'+str(j)+'_'+str(k)+'.png')
                 attn_map.save(fname+'_attn_map_'+str(j)+'.png')
+                # attn_map.save(fname+'_corr_map.png')
+
+
+
+            # for j in range(len(network.dec_blocks)):     # 12, 12, 768, 768
+            #     # for k in range(12):
+            #     # attn_map = network.dec_blocks[j].cross_attn.attn_map
+            #     # attn_map = attn_map.squeeze().mean(dim=0)
+                
+            #     # attn_map = attn_map.squeeze()[k]
+            #     # attn_map = attn_map.squeeze()
+            #     # attn_map[:,0] =0 
+            #     attn_map = attn_map.reshape(H_32//16,W_32//16,-1)
+            #     attn_map = attn_map[height][width].reshape(H_32//16,W_32//16)       # 24, 32
+
+            #     img_tmp = img2.squeeze(dim=0).clone().permute(1,2,0).cpu().detach().numpy()
+
+            #     attn_map = resize(attn_map.unsqueeze(0).unsqueeze(0)).squeeze(0).permute(1,2,0).cpu().detach().numpy()
+
+            #     vmax = np.percentile(attn_map, 100)
+            #     vmin = attn_map.min()
+            #     normalizer = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+            #     mapper = cm.ScalarMappable(norm=normalizer, cmap='jet')
+            #     colormapped_im = (mapper.to_rgba(attn_map[:,:,0])[:, :, :3] * 255).astype(np.uint8)
+            #     attn_map = cv2.addWeighted((img_tmp*255).astype(np.uint8), 0.6, colormapped_im, 0.4, 0)
+            #     attn_map = Image.fromarray(attn_map)
+            #     # attn_map.save(fname+'_attn_map_'+str(j)+'_'+str(k)+'.png')
+            #     attn_map.save(fname+'_attn_map_'+str(j)+'.png')
 
 
 

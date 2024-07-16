@@ -16,6 +16,7 @@ from functools import partial
 from models.croco.blocks import Block, DecoderBlock, PatchEmbed
 from models.croco.pos_embed import get_2d_sincos_pos_embed, RoPE2D 
 from models.croco.masking import RandomMask
+from models.croco.simple_cats import CATs
 
 
 class CroCoNet(nn.Module):
@@ -34,9 +35,18 @@ class CroCoNet(nn.Module):
                  norm_layer=partial(nn.LayerNorm, eps=1e-6),
                  norm_im2_in_dec=True,   # whether to apply normalization of the 'memory' = (second image) in the decoder 
                  pos_embed='cosine',     # positional embedding (either cosine or RoPE100)
+                 attn_map_output=False,  # whether to output the attention maps
+                 cost_agg=False,
+                 output_interp=False,
+                 inv=False,
                 ):
                 
         super(CroCoNet, self).__init__()
+         
+        self.cost_agg = cost_agg
+        self.attn_map_output = attn_map_output or cost_agg
+        if self.cost_agg:
+            self.cats = CATs(feature_size=14, hyperpixel_ids = [i for i in range(0, 12)], output_interp=output_interp,inv=inv)
                 
         # patch embeddings  (with initialization done as in MAE)
         self._set_patch_embed(img_size, patch_size, enc_embed_dim)
@@ -188,16 +198,22 @@ class CroCoNet(nn.Module):
         # apply Transformer blocks
         out = f1_
         out2 = f2 
+        attn_maps = []
         if return_all_blocks:
             _out, out = out, []
             for blk in self.dec_blocks:
-                _out, out2 = blk(_out, out2, pos1, pos2)
+                _out, out2, attn_map = blk(_out, out2, pos1, pos2)
                 out.append(_out)
+                attn_maps.append(attn_map)
             out[-1] = self.dec_norm(out[-1])
         else:
             for blk in self.dec_blocks:
-                out, out2 = blk(out, out2, pos1, pos2)
+                out, out2, attn_map = blk(out, out2, pos1, pos2)
+                attn_maps.append(attn_map)
             out = self.dec_norm(out)
+            
+        if self.attn_map_output:
+            return out, attn_maps
         return out
 
     def patchify(self, imgs):
@@ -228,7 +244,7 @@ class CroCoNet(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], channels, h * patch_size, h * patch_size))
         return imgs
 
-    def forward(self, img1, img2):
+    def forward(self, img_target, img_source,mode=None):
         """
         img1: tensor of size B x 3 x img_size x img_size
         img2: tensor of size B x 3 x img_size x img_size
@@ -236,14 +252,32 @@ class CroCoNet(nn.Module):
         out will be    B x N x (3*patch_size*patch_size)
         masks are also returned as B x N just in case 
         """
+        B,_,H,W = img_target.size()
+        feat_target, pos_target, mask_target = self._encode_image(img_target, do_mask=False)
         # encoder of the masked first image 
-        feat1, pos1, mask1 = self._encode_image(img1, do_mask=True)
+        feat_source, pos_source, mask1 = self._encode_image(img_source, do_mask=False)
         # encoder of the second image 
-        feat2, pos2, _ = self._encode_image(img2, do_mask=False)
-        # decoder 
-        decfeat = self._decoder(feat1, pos1, mask1, feat2, pos2)
+        # decoder
+        if self.attn_map_output:
+            decfeat, attn_map = self._decoder(feat_target, pos_target, mask_target, feat_source, pos_source, return_all_blocks=True)
+        else:
+            decfeat = self._decoder(feat_target, pos_target, mask_target, feat_source, pos_source)
+        
+        attn_map = [attn.mean(dim=1).detach() for attn in attn_map]
+        for i in range(len(attn_map)):
+            attn_map[i][:,:,0]=attn_map[i].min()
+        
+        self.attn_map = attn_map
+        
         # prediction head 
-        out = self.prediction_head(decfeat)
+        # out = self.prediction_head(decfeat)
         # get target
-        target = self.patchify(img1)
+        # target = self.patchify(img1)
+        target=None
+        
+        if self.cost_agg:
+            decfeat = [feat.detach() for feat in decfeat]
+            out = self.cats(attn_map, decfeat, (H,W))
+            
+            return out
         return out, mask1, target

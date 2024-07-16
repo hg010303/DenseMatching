@@ -57,7 +57,7 @@ def assign_default(default_dict, dict):
 def PreMadeDataset(root, source_image_transform=None, target_image_transform=None, flow_transform=None,
                    co_transform=None, split=None, get_mapping=False, compute_mask_zero_borders=False,
                    add_discontinuity=False, min_nbr_perturbations=5, max_nbr_perturbations=6,
-                   parameters_v2=None):
+                   parameters_v2=None, img_size=None):
 
     """
     Builds a dataset from existing image pairs and corresponding ground-truth flow fields and optionally add
@@ -102,11 +102,11 @@ def PreMadeDataset(root, source_image_transform=None, target_image_transform=Non
         train_dataset = ListDataset(root, train_list, source_image_transform=source_image_transform,
                                     target_image_transform=target_image_transform,
                                     flow_transform=flow_transform, co_transform=co_transform, get_mapping=get_mapping,
-                                    compute_mask_zero_borders=compute_mask_zero_borders)
+                                    compute_mask_zero_borders=compute_mask_zero_borders, img_size=img_size)
         test_dataset = ListDataset(root, test_list, source_image_transform=source_image_transform,
                                    target_image_transform=target_image_transform,
                                    flow_transform=flow_transform, co_transform=co_transform, get_mapping=get_mapping,
-                                   compute_mask_zero_borders=compute_mask_zero_borders)
+                                   compute_mask_zero_borders=compute_mask_zero_borders, img_size=img_size)
     else:
         parameters_v2 = assign_default(perturbations_parameters_v2, parameters_v2)
         train_dataset = DiscontinuityDatasetV2(root, train_list, source_image_transform=source_image_transform,

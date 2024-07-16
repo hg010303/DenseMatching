@@ -60,7 +60,7 @@ class AugmentedImagePairsDatasetMultipleObjects(BaseVideoDataset):
                  source_image_transform=None, target_image_transform=None, flow_transform=None,
                  co_transform=None, compute_occlusion_mask=False, compute_out_of_view_mask=False,
                  compute_object_reprojection_mask=False, compute_mask_zero_borders=False, random_nbr_objects=False,
-                 number_of_objects=4, object_proba=0.8, output_flow_size=None):
+                 number_of_objects=4, object_proba=0.8, output_flow_size=None, image_size=None):
         """
         Args:
             foreground_image_dataset - A segmentation dataset from which foreground objects are cropped using the
@@ -119,6 +119,7 @@ class AugmentedImagePairsDatasetMultipleObjects(BaseVideoDataset):
         self.random_nbr_objects = random_nbr_objects
         self.number_of_objects = number_of_objects
         self.size_flow = output_flow_size
+        self.image_size = image_size
 
     def get_name(self):
         return self.name
@@ -446,6 +447,23 @@ class AugmentedImagePairsDatasetMultipleObjects(BaseVideoDataset):
         else:
             if self.flow_transform is not None:
                 flow_file = self.flow_transform(flow_file)
+                
+        if self.image_size is not None:
+            source_image = F.interpolate(input=source_image.unsqueeze(0), size=self.image_size,
+                                         mode='bilinear', align_corners=False).squeeze()
+            target_image = F.interpolate(input=target_image.unsqueeze(0), size=self.image_size,
+                                         mode='bilinear', align_corners=False).squeeze()
+            
+            flow_h,flow_w = flow_file.shape[1],flow_file.shape[2]
+            flow_file = F.interpolate(input=flow_file.unsqueeze(0), size=self.image_size,
+                                        mode='bilinear', align_corners=False).squeeze()
+            
+            flow_file[0] *= float(self.image_size[0]) / float(flow_h)
+            flow_file[1] *= float(self.image_size[1]) / float(flow_w)
+            
+            correspondence_mask = F.interpolate(input=correspondence_mask.unsqueeze(0).unsqueeze(0).float(),
+                                                size=self.image_size, mode='nearest').squeeze().bool()
+            size_bg = (self.image_size[0],self.image_size[1],3) 
 
         output = {'source_image': source_image,  'target_image': target_image, 'flow_map': flow_file,
                   'correspondence_mask': correspondence_mask, 'source_image_size': size_bg, 'sparse': False}

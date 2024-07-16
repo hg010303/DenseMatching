@@ -354,7 +354,7 @@ class CATs(nn.Module):
     def corr(self, src, trg):
         return src.flatten(2).transpose(-1, -2) @ trg.flatten(2)
 
-    def forward(self, im_source, im_target, mode='flow_prediction', *args, **kwargs):
+    def forward(self, im_target, im_source, mode='flow_prediction', *args, **kwargs):
         B, _, H, W = im_target.size()
 
         src_feats = self.feature_extraction(im_source)
