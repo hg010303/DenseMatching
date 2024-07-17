@@ -93,7 +93,7 @@ def main(args, settings):
                                                             use_original_size=original_size, split=0)
                     test_dataloader = DataLoader(test_set, batch_size=1, num_workers=8)
                     output_scene = run_evaluation_generic(network, test_dataloader, device,
-                                                        estimate_uncertainty=estimate_uncertainty, args= args,vis_attn=True)
+                                                        estimate_uncertainty=estimate_uncertainty, args= args,vis_attn=True,hp=id)
                     list_of_outputs.append(output_scene)
 
                 output = {'scene_1': list_of_outputs[0], 'scene_2': list_of_outputs[1], 'scene_3': list_of_outputs[2],

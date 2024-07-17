@@ -39,14 +39,16 @@ class CroCoNet(nn.Module):
                  cost_agg=False,
                  output_interp=False,
                  inv=False,
+                 cost_transformer=True,
                 ):
                 
         super(CroCoNet, self).__init__()
          
         self.cost_agg = cost_agg
         self.attn_map_output = attn_map_output or cost_agg
+        self.cost_transformer=cost_transformer
         if self.cost_agg:
-            self.cats = CATs(feature_size=14, hyperpixel_ids = [i for i in range(0, 12)], output_interp=output_interp,inv=inv)
+            self.cats = CATs(feature_size=14, hyperpixel_ids = [i for i in range(0, 12)], output_interp=output_interp,inv=inv, cost_transformer=cost_transformer)
                 
         # patch embeddings  (with initialization done as in MAE)
         self._set_patch_embed(img_size, patch_size, enc_embed_dim)
@@ -277,7 +279,7 @@ class CroCoNet(nn.Module):
         
         if self.cost_agg:
             decfeat = [feat.detach() for feat in decfeat]
-            out = self.cats(attn_map, decfeat, (H,W))
+            out = self.cats(attn_map, decfeat, (H,W), feat_source, feat_target)
             
             return out
         return out, mask1, target

@@ -217,13 +217,14 @@ def select_model(model_name, pre_trained_model_type, arguments, global_optim_ite
     elif 'CATs' in model_name:
         # similar to original work, we use softargmax as the inference_strategy. This is because the kp loss is the
         # EPE after applying softargmax.
-        network = CATs(forward_pass_strategy='flow_prediction', inference_strategy='softargmax')
+        network = CATs(forward_pass_strategy='flow_prediction', inference_strategy='softargmax',cost_transformer=False)
     elif model_name == 'croco':
         ckpt = torch.load(path_to_pre_trained_models,'cpu')
         croco_args = croco_args_from_ckpt(ckpt)
         croco_args['img_size'] = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
         croco_args['cost_agg'] = True
-        croco_args['three']=False
+        croco_args['output_interp'] = True
+        croco_args['cost_transformer']=False
         network = CroCoNet(**croco_args)
         network.load_state_dict(ckpt['model'], strict=False)
 
@@ -265,7 +266,8 @@ def select_model(model_name, pre_trained_model_type, arguments, global_optim_ite
         raise ValueError('The checkpoint that you chose does not exist, {}'.format(checkpoint_fname))
 
     if 'croco' not in model_name or 'dust3r' not in model_name:
-        network = load_network(network, checkpoint_path=checkpoint_fname)
+        if 'CATs' != model_name:
+            network = load_network(network, checkpoint_path=checkpoint_fname)
         network.eval()
         network = network.to(device)
 

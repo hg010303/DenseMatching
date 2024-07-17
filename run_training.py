@@ -12,7 +12,7 @@ from datetime import date
 import admin.settings as ws_settings
 
 
-def run_training(train_module, train_name, seed, cudnn_benchmark=True):
+def run_training(train_module, train_name, seed, cudnn_benchmark=True,tag=None):
     """Run a train scripts in train_settings.
     args:
         train_module: Name of module in the "train_settings/" folder.
@@ -33,7 +33,8 @@ def run_training(train_module, train_name, seed, cudnn_benchmark=True):
     settings = ws_settings.Settings()
     settings.module_name = train_module
     settings.script_name = train_name
-    settings.project_path = 'train_settings/{}/{}'.format(train_module, train_name)
+    settings.project_path = 'train_settings/{}/{}__{}'.format(train_module, train_name,tag)
+    settings.copy_project_path = 'train_settings/{}/{}'.format(train_module, train_name)
     settings.seed = seed
 
     # will save the checkpoints there
@@ -41,7 +42,7 @@ def run_training(train_module, train_name, seed, cudnn_benchmark=True):
     save_dir = os.path.join(settings.env.workspace_dir, settings.project_path)
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
-    copyfile(settings.project_path + '.py', os.path.join(save_dir, settings.script_name + '.py'))
+    copyfile(settings.copy_project_path + '.py', os.path.join(save_dir, settings.script_name + '.py'))
 
     expr_module = importlib.import_module('train_settings.{}.{}'.format(train_module.replace('/', '.'),
                                                                         train_name.replace('/', '.')))
@@ -54,6 +55,7 @@ def main():
     parser = argparse.ArgumentParser(description='Run a train scripts in train_settings.')
     parser.add_argument('train_module', type=str, help='Name of module in the "train_settings/" folder.')
     parser.add_argument('train_name', type=str, help='Name of the train settings file.')
+    parser.add_argument('--tag', type=str, help='Tag for the experiment.', default='first')
     parser.add_argument('--cudnn_benchmark', type=bool, default=True,
                         help='Set cudnn benchmark on (1) or off (0) (default is on).')
     parser.add_argument('--seed', type=int, default=1992, help='Pseudo-RNG seed')
@@ -67,7 +69,7 @@ def main():
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
 
-    run_training(args.train_module, args.train_name, cudnn_benchmark=args.cudnn_benchmark, seed=args.seed)
+    run_training(args.train_module, args.train_name, cudnn_benchmark=args.cudnn_benchmark, seed=args.seed,tag=args.tag)
 
 
 if __name__ == '__main__':

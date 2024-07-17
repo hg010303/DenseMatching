@@ -221,18 +221,21 @@ class CATs(nn.Module):
     hyperpixel_ids=[0,8,20,21,26,28,29,30],
     freeze=True,
     output_interp=False,
-    inv=False,):
+    inv=False,
+    cost_transformer=True):
         super().__init__()
         self.feature_size = feature_size
         self.feature_proj_dim = feature_proj_dim
         self.decoder_embed_dim = self.feature_size ** 2 + self.feature_proj_dim
         self.inv=inv
-        
+        self.cost_transformer=cost_transformer    
 
         channels = [768]*12
 
         # self.feature_extraction = FeatureExtractionHyperPixel(hyperpixel_ids, feature_size, freeze)
-        self.proj = nn.ModuleList([
+        self.bn = nn.ModuleList([nn.BatchNorm1d(channels[i]) for i in hyperpixel_ids])
+        
+        self.proj = nn.ModuleList([ 
             nn.Linear(channels[i], self.feature_proj_dim) for i in hyperpixel_ids
         ])
 
@@ -291,7 +294,7 @@ class CATs(nn.Module):
     def corr(self, src, trg):
         return src.flatten(2).transpose(-1, -2) @ trg.flatten(2)
 
-    def forward(self, attn_maps, tgt_feats,output_shape):
+    def forward(self, attn_maps, tgt_feats,output_shape, feat_source, feat_target):
         # B, _, H, W = target.size()
         B, _,_ = tgt_feats[0].size()
 
@@ -305,23 +308,28 @@ class CATs(nn.Module):
         #     corr = self.corr(self.l2norm(src), self.l2norm(tgt))
         #     corrs.append(corr)
             # src_feats_proj.append(self.proj[i](src.flatten(2).transpose(-1, -2)))
+            B,L,C = tgt_feats[i].shape
+            
+            tgt_feats[i] = tgt_feats[i].view(B*L,C)
+            tgt_feats[i] = self.bn[i](tgt_feats[i])
+            tgt_feats[i] = tgt_feats[i].view(B,L,C)/10.
             tgt_feats_proj.append(self.proj[i](tgt_feats[i]))
             # tgt_feats_proj.append(self.proj[i](tgt.flatten(2).transpose(-1, -2)))
+            
         
         tgt_feats = torch.stack(tgt_feats_proj, dim=1)
         attn_maps = torch.stack(attn_maps, dim=1)
-        
         # attn_maps = self.mutual_nn_filter(attn_maps)
 
         refined_corr = self.decoder(attn_maps, tgt_feats)
-        # refined_corr = attn_maps.mean(dim=1)
-        # refined_corr[:,:,0] = 0
-        # refined_corr = refined_corr/refined_corr.sum(dim=2,keepdim=True)
+        if not self.cost_transformer:
+            refined_corr = attn_maps.mean(dim=1) ## target source
+            # refined_corr = self.corr(self.l2norm(feat_target.permute(0,2,1)),self.l2norm(feat_source.permute(0,2,1)))
 
         if self.inv:
             grid_x, grid_y = self.soft_argmax(refined_corr.view(B, -1, self.feature_size, self.feature_size))
         else:
-            grid_x, grid_y = self.soft_argmax(refined_corr.transpose(-1,-2).view(B, -1, self.feature_size, self.feature_size))
+            grid_x, grid_y = self.soft_argmax(refined_corr.transpose(-1,-2).view(B, -1, self.feature_size, self.feature_size),beta=2e-2)
         self.grid_x = grid_x
         self.grid_y = grid_y
 

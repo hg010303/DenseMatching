@@ -255,7 +255,8 @@ class CATs(nn.Module):
                  num_heads=6,
                  mlp_ratio=4,
                  hyperpixel_ids=[2,17,21,22,25,26,28],  # [0,8,20,21,26,28,29,30] for spair
-                 freeze=True, forward_pass_strategy=None, inference_strategy='softargmax'):
+                 freeze=True, forward_pass_strategy=None, inference_strategy='softargmax',
+                 cost_transformer=True):
         super().__init__()
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.inference_strategy = inference_strategy
@@ -263,6 +264,7 @@ class CATs(nn.Module):
         self.feature_size = feature_size
         self.feature_proj_dim = feature_proj_dim
         self.decoder_embed_dim = self.feature_size ** 2 + self.feature_proj_dim
+        self.cost_transformer=cost_transformer
         
         channels = [64] + [256] * 3 + [512] * 4 + [1024] * 23 + [2048] * 3
 
@@ -376,10 +378,14 @@ class CATs(nn.Module):
         corr = self.mutual_nn_filter(corr)
 
         refined_corr = self.decoder(corr, src_feats, tgt_feats)
+        if not self.cost_transformer:
+            refined_corr = corr.mean(dim=1)
+
 
         if mode == 'flow_prediction' or self.forward_pass_strategy == 'flow_prediction':
             output_shape = im_target.shape[-2:]
             grid_x_t_to_s, grid_y_t_to_s = self.soft_argmax(refined_corr.view(B, -1, self.feature_size, self.feature_size))
+            self.grid_x, self.grid_y = grid_x_t_to_s, grid_y_t_to_s
 
             flow_t_to_s = torch.cat((grid_x_t_to_s, grid_y_t_to_s), dim=1)
             flow_t_to_s = unnormalise_and_convert_mapping_to_flow(flow_t_to_s)
@@ -442,7 +448,7 @@ class CATs(nn.Module):
         ratio_y = float(h_scale) / float(h_preprocessed)
         return source_img.to(self.device), target_img.to(self.device), ratio_x, ratio_y
 
-    def estimate_flow(self, source_img, target_img, output_shape=None, scaling=1.0, mode='channel_first',
+    def estimate_flow(self, target_img, source_img, output_shape=None, scaling=1.0, mode='channel_first',
                       *args, **kwargs):
         """
         Estimates the flow field relating the target to the source image. Returned flow has output_shape if provided,

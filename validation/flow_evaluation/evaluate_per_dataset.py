@@ -12,6 +12,7 @@ import matplotlib.cm as cm
 import cv2
 import matplotlib.pyplot as plt
 
+from utils_flow.pixel_wise_mapping import warp
 from utils_flow.img_processing_utils import pad_to_same_shape
 from utils_flow.util_optical_flow import flow_to_image
 from validation.flow_evaluation.metrics_uncertainty import (compute_average_of_uncertainty_metrics, compute_aucs,
@@ -402,7 +403,7 @@ def run_evaluation_sintel(network, test_dataloader, device, estimate_uncertainty
     return output
 
 
-def run_evaluation_generic(network, test_dataloader, device, estimate_uncertainty=False, args=None, vis_attn=False):
+def run_evaluation_generic(network, test_dataloader, device, estimate_uncertainty=False, args=None, vis_attn=False,hp=0):
     pbar = tqdm(enumerate(test_dataloader), total=len(test_dataloader))
     mean_epe_list, epe_all_list, pck_1_list, pck_3_list, pck_5_list = [], [], [], [], []
     dict_list_uncertainties = {}
@@ -425,20 +426,20 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
             target_img = (target_img - in1k_mean) / in1k_std
 
             H,W = args.image_shape
-            H_32 = (H//32)*32
-            W_32 = (W//32)*32
+            H_32, W_32 = (H//32)*32, (W//32)*32
 
             source_img = F.interpolate(source_img, size=(H_32, W_32), mode='bilinear', align_corners=False).to(device)
             target_img = F.interpolate(target_img, size=(H_32, W_32), mode='bilinear', align_corners=False).to(device)
             
             mask_valid = F.interpolate(mask_valid.float().unsqueeze(0), size=(H_32, W_32), mode='nearest').squeeze(0).bool().to(device)
             
+            flow_gt_h,flow_gt_w = flow_gt.size(2),flow_gt.size(3)
             flow_gt = F.interpolate(flow_gt, size=(H_32, W_32), mode='bilinear', align_corners=False).to(device)
-            
+            flow_gt[:,0,:,:] *= W_32/flow_gt_w
+            flow_gt[:,1,:,:] *= H_32/flow_gt_h
 
-
-            flow_est = network(source_img, target_img)
-            
+            flow_est = network(target_img, source_img)
+                        
             if args.model=='dust3r':
                 flow_est = flow_est[0]['pts3d']
                 flow_est = flow_est[:,:,:,:2].permute(0,3,1,2)
@@ -447,83 +448,127 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
                 # flow_pred = flow_est.clone()
                 pass
         else:
-            flow_est = network.estimate_flow(source_img, target_img)
+            H,W = args.image_shape
+            H_32, W_32 = (H//32)*32, (W//32)*32
+            
+            source_img = F.interpolate(source_img, size=(H_32, W_32), mode='bilinear', align_corners=False).to(device)
+            target_img = F.interpolate(target_img, size=(H_32, W_32), mode='bilinear', align_corners=False).to(device)
+            mask_valid = F.interpolate(mask_valid.float().unsqueeze(0), size=(H_32, W_32), mode='nearest').squeeze(0).bool().to(device)
+            flow_gt_h,flow_gt_w = flow_gt.size(2),flow_gt.size(3)
+            flow_gt = F.interpolate(flow_gt, size=(H_32, W_32), mode='bilinear', align_corners=False).to(device)
+            flow_gt[:,0,:,:] *= W_32/flow_gt_w
+            flow_gt[:,1,:,:] *= H_32/flow_gt_h
+            
+            flow_est = network.estimate_flow(target_img, source_img)
+            
+        flow_pred = flow_est.clone()
+        flow_gt2 = flow_gt.clone()
 
-        # flow_est = flow_est.permute(0, 2, 3, 1)[mask_valid]
-        # flow_gt = flow_gt.permute(0, 2, 3, 1)[mask_valid]
+        flow_est = flow_est.permute(0, 2, 3, 1)[mask_valid]
+        flow_gt = flow_gt.permute(0, 2, 3, 1)[mask_valid]
 
-        # epe = torch.sum((flow_est - flow_gt) ** 2, dim=1).sqrt()
+        epe = torch.sum((flow_est - flow_gt) ** 2, dim=1).sqrt()
 
-        # epe_all_list.append(epe.view(-1).cpu().numpy())
-        # mean_epe_list.append(epe.mean().item())
-        # pck_1_list.append(epe.le(1.0).float().mean().item())
-        # pck_3_list.append(epe.le(3.0).float().mean().item())
-        # pck_5_list.append(epe.le(5.0).float().mean().item())
+        epe_all_list.append(epe.view(-1).cpu().numpy())
+        mean_epe_list.append(epe.mean().item())
+        pck_1_list.append(epe.le(1.0).float().mean().item())
+        pck_3_list.append(epe.le(3.0).float().mean().item())
+        pck_5_list.append(epe.le(5.0).float().mean().item())
 
         if vis_attn:
-            output_dir = './output_crocov2/output_diffimg_224224_tmp'
+            in1k_mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1).to(source_img.device)
+            in1k_std =  torch.tensor([0.229, 0.224, 0.225]).view(3,1,1).to(source_img.device)
+            
+            output_dir = f'./output_crocov2/output_diffimg_224224_flow_nozero'
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir)
-
-
-
-            img1 = source_img.squeeze()
-            img2 = target_img.squeeze()
             
-            # img2 = img1.clone()
-
+            if 'croco' in args.model:
+                source_img, target_img = source_img.squeeze()*in1k_std + in1k_mean, target_img.squeeze() * in1k_std + in1k_mean
+                grid_x, grid_y = ((network.cats.grid_x+1)*(14-1)/2.).squeeze(), ((network.cats.grid_y+1)*(14-1)/2.).squeeze()
+            else:
+                source_img, target_img = source_img.squeeze()/255., target_img.squeeze()/255.
+                grid_x, grid_y = ((network.grid_x+1)*(14-1)/2.).squeeze(), ((network.grid_y+1)*(14-1)/2.).squeeze()
+                
+ 
             fname = os.path.join(output_dir, 'img_'+str(i_batch))
-
-            in1k_mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1).to(img1.device)
-            in1k_std =  torch.tensor([0.229, 0.224, 0.225]).view(3,1,1).to(img1.device)
-            img1 = img1*in1k_std + in1k_mean
-            img2 = img2*in1k_std + in1k_mean
             
-            height = torch.randint(0, H_32//16, (1,)).item()
-            width = torch.randint(0, W_32//16, (1,)).item()
+            height,width = torch.randint(0, H_32//16, (1,)).item(), torch.randint(0, W_32//16, (1,)).item()
 
-            img1[...,height*16:(height+1)*16,width*16:(width+1)*16] = 1
-            img_tmp = img1.clone().permute(1,2,0).cpu().numpy()
-            img_input = Image.fromarray((img_tmp*255).astype(np.uint8))
-            img_input.save(fname+'_input.png')
+            ## vis target
+            target_img[...,height*16:(height+1)*16,width*16:(width+1)*16] = 1
+            target_input = target_img.clone().permute(1,2,0).cpu().numpy()
+            target_input = Image.fromarray((target_input*255).astype(np.uint8))
+            target_input.save(fname+'_target.png')
 
-            img2_input = img2.clone().permute(1,2,0).cpu().numpy()
-            img2_input = Image.fromarray((img2_input*255).astype(np.uint8))
-            img2_input.save(fname+'_img2.png')
-
+            ## vis source
+            source_input = source_img.clone().permute(1,2,0).cpu().numpy()
+            source_input = Image.fromarray((source_input*255).astype(np.uint8))
+            source_input.save(fname+'_source.png')
             resize = torchvision.transforms.Resize((H_32, W_32))
 
-            # ## visualize flow
-            # # flow_img = flow_to_image(flow_pred.squeeze().permute(1,2,0).cpu().numpy())
-            # # flow_img = Image.fromarray(flow_img)
-            # # flow_img.save(fname+'_flow.png')
+            ## vis gt and pred flow
+            mask_valid = mask_valid.cpu().permute(1,2,0).repeat(1,1,3).numpy()
+            flow_img = flow_to_image(flow_pred.squeeze().permute(1,2,0).cpu().numpy()) * mask_valid
+            flow_img = Image.fromarray(flow_img)
+            flow_img.save(fname+'_predflow.png')
+            
+            flow_gt = flow_to_image(flow_gt2.squeeze().permute(1,2,0).cpu().numpy()) * mask_valid
+            flow_gt = Image.fromarray(flow_gt)
+            flow_gt.save(fname+'_gtflow.png')
+            
+            grid_map = torch.zeros(H_32//16,W_32//16)
+            grid_map[grid_y[height,width].long(),grid_x[height,width].long()] = 1
+            grid_map = resize(grid_map.unsqueeze(0).unsqueeze(0)).squeeze(0).permute(1,2,0).cpu().detach().numpy()
+            
+            source_input = source_img.squeeze(dim=0).clone().permute(1,2,0).cpu().detach().numpy()
+            mapper = cm.ScalarMappable(norm = mpl.colors.Normalize(vmin=grid_map.min(),vmax=grid_map.max()), cmap='jet')
+            colormapped_im = (mapper.to_rgba(grid_map[:,:,0])[:,:,:3]*255).astype(np.uint8)
+            grid_map = cv2.addWeighted((source_input*255).astype(np.uint8), 0.6, colormapped_im, 0.4, 0)
+            grid_map = Image.fromarray(grid_map)
+            grid_map.save(fname+'_grid_map.png')
+            
+            
+            warped_tgt = warp(source_img.detach().cpu().unsqueeze(dim=0), flow_pred.detach().cpu())
+            gt_warped_tgt = warp(source_img.detach().cpu().unsqueeze(dim=0), flow_gt2.detach().cpu())
+            
+            warped_tgt = (warped_tgt.squeeze().permute(1,2,0).cpu().numpy()*255)
+            masked_warped_tgt = warped_tgt * mask_valid
+            warped_tgt = Image.fromarray(warped_tgt.astype(np.uint8))
+            masked_warped_tgt = Image.fromarray(masked_warped_tgt.astype(np.uint8))
+            masked_warped_tgt.save(fname+'_mask_warped_tgt.png')
+            warped_tgt.save(fname+'_warped_tgt.png')
+            
+            gt_warped_tgt = Image.fromarray((gt_warped_tgt.squeeze().permute(1,2,0).cpu().numpy()*255).astype(np.uint8))
+            gt_warped_tgt.save(fname+'_gt_warped_tgt.png')
+            
 
-            for j in range(len(network.dec_blocks)):     # 12, 12, 768, 768
-                # for k in range(12):
-                attn_map = network.attn_map[j]
-                # attn_map = network.dec_blocks[j].cross_attn.attn_map
-                attn_map = attn_map.squeeze()
+            # for j in range(len(network.dec_blocks)):     # 12, 12, 768, 768
+            #     # for k in range(12):
+            #     attn_map = network.attn_map[j]
+            #     # attn_map = network.dec_blocks[j].cross_attn.attn_map
+            #     attn_map = attn_map.squeeze()
                 
-                # attn_map = attn_map.squeeze()[k]
-                # attn_map = attn_map.squeeze()
-                attn_map[:,0] =0 
-                # attn_map = corr_map
-                attn_map = attn_map.reshape(H_32//16,W_32//16,-1)
-                attn_map = attn_map[height][width].reshape(H_32//16,W_32//16)       # 24, 32
+            #     # attn_map = attn_map.squeeze()[k]
+            #     # attn_map = attn_map.squeeze()
+            #     attn_map[:,0] =0 
+            #     # attn_map = corr_map
+            #     attn_map = attn_map.reshape(H_32//16,W_32//16,-1)
+            #     attn_map = attn_map[height][width].reshape(H_32//16,W_32//16)       # 24, 32
 
-                img_tmp = img2.squeeze(dim=0).clone().permute(1,2,0).cpu().detach().numpy()
+            #     img_tmp = img2.squeeze(dim=0).clone().permute(1,2,0).cpu().detach().numpy()
 
-                attn_map = resize(attn_map.unsqueeze(0).unsqueeze(0)).squeeze(0).permute(1,2,0).cpu().detach().numpy()
+            #     attn_map = resize(attn_map.unsqueeze(0).unsqueeze(0)).squeeze(0).permute(1,2,0).cpu().detach().numpy()
 
-                vmax = np.percentile(attn_map, 100)
-                vmin = attn_map.min()
-                normalizer = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
-                mapper = cm.ScalarMappable(norm=normalizer, cmap='jet')
-                colormapped_im = (mapper.to_rgba(attn_map[:,:,0])[:, :, :3] * 255).astype(np.uint8)
-                attn_map = cv2.addWeighted((img_tmp*255).astype(np.uint8), 0.6, colormapped_im, 0.4, 0)
-                attn_map = Image.fromarray(attn_map)
-                attn_map.save(fname+'_attn_map_'+str(j)+'.png')
-                # attn_map.save(fname+'_corr_map.png')
+            #     vmax = np.percentile(attn_map, 100)
+            #     vmin = attn_map.min()
+            #     normalizer = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+            #     mapper = cm.ScalarMappable(norm=normalizer, cmap='jet')
+            #     colormapped_im = (mapper.to_rgba(attn_map[:,:,0])[:, :, :3] * 255).astype(np.uint8)
+            #     attn_map = cv2.addWeighted((img_tmp*255).astype(np.uint8), 0.6, colormapped_im, 0.4, 0)
+            #     attn_map = Image.fromarray(attn_map)
+            #     attn_map.save(fname+'_attn_map_'+str(j)+'.png')
+            #     # attn_map.save(fname+'_corr_map.png')
 
 
 
@@ -595,6 +640,8 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
     pck1_dataset = np.mean(epe_all <= 1)
     pck3_dataset = np.mean(epe_all <= 3)
     pck5_dataset = np.mean(epe_all <= 5)
+    pck8_dataset = np.mean(epe_all <= 8)
+    pck16_dataset = np.mean(epe_all <= 16)
     output = {'AEPE': np.mean(mean_epe_list), 'PCK_1_per_image': np.mean(pck_1_list),
               'PCK_3_per_image': np.mean(pck_3_list), 'PCK_5_per_image': np.mean(pck_5_list),
               'PCK_1_per_dataset': pck1_dataset, 'PCK_3_per_dataset': pck3_dataset,
@@ -603,8 +650,8 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
               'num_pixels_pck_5': np.sum(epe_all <= 5).astype(np.float64),
               'num_valid_corr': len(epe_all)
               }
-    print("Validation EPE: %f, 1px: %f, 3px: %f, 5px: %f" % (np.mean(mean_epe_list), pck1_dataset,
-                                                             pck3_dataset, pck5_dataset))
+    print("Validation EPE: %f, 1px: %f, 3px: %f, 5px: %f, 8px: %f, 16px: %f" % (np.mean(mean_epe_list), pck1_dataset,
+                                                             pck3_dataset, pck5_dataset, pck8_dataset, pck16_dataset))
     if estimate_uncertainty:
         for uncertainty_name in dict_list_uncertainties.keys():
             output['uncertainty_dict_{}'.format(uncertainty_name)] = compute_average_of_uncertainty_metrics(
