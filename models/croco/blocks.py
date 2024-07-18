@@ -180,9 +180,9 @@ class CrossAttention(nn.Module):
             k = self.rope(k, kpos)
             
         attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn_tmp = attn.clone().detach()  
         
         attn = attn.softmax(dim=-1)
-        attn_tmp = attn.clone().detach()  
         
 
         attn = self.attn_drop(attn)

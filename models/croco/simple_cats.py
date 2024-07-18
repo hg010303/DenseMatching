@@ -222,17 +222,21 @@ class CATs(nn.Module):
     freeze=True,
     output_interp=False,
     inv=False,
-    cost_transformer=True):
+    cost_transformer=True,
+    **kwargs):
         super().__init__()
         self.feature_size = feature_size
         self.feature_proj_dim = feature_proj_dim
         self.decoder_embed_dim = self.feature_size ** 2 + self.feature_proj_dim
         self.inv=inv
-        self.cost_transformer=cost_transformer    
+        self.cost_transformer=cost_transformer
+        self.kwargs=kwargs
+        self.correlation = getattr(kwargs,'correlation',False)
 
-        channels = [768]*12
+        channels = [768]*13 if self.correlation else [768]*12
 
         # self.feature_extraction = FeatureExtractionHyperPixel(hyperpixel_ids, feature_size, freeze)
+        self.ln = nn.ModuleList([nn.LayerNorm(channels[i]) for i in hyperpixel_ids])
         self.bn = nn.ModuleList([nn.BatchNorm1d(channels[i]) for i in hyperpixel_ids])
         
         self.proj = nn.ModuleList([ 
@@ -295,27 +299,21 @@ class CATs(nn.Module):
         return src.flatten(2).transpose(-1, -2) @ trg.flatten(2)
 
     def forward(self, attn_maps, tgt_feats,output_shape, feat_source, feat_target):
-        # B, _, H, W = target.size()
         B, _,_ = tgt_feats[0].size()
 
-        # src_feats = self.feature_extraction(source)
-        # tgt_feats = self.feature_extraction(target)
-
-        # corrs = []
         tgt_feats_proj = []
-        # tgt_feats_proj = []
+        
+        if self.correlation:
+            corr = self.corr(self.l2norm(feat_target.permute(0,2,1)),self.l2norm(feat_source.permute(0,2,1)))
+            attn_maps = [corr] + attn_maps
+            tgt_feats = [feat_target] + tgt_feats
+        
         for i in range(len(self.proj)):
-        #     corr = self.corr(self.l2norm(src), self.l2norm(tgt))
-        #     corrs.append(corr)
-            # src_feats_proj.append(self.proj[i](src.flatten(2).transpose(-1, -2)))
             B,L,C = tgt_feats[i].shape
             
-            tgt_feats[i] = tgt_feats[i].view(B*L,C)
-            tgt_feats[i] = self.bn[i](tgt_feats[i])
-            tgt_feats[i] = tgt_feats[i].view(B,L,C)/10.
+            tgt_feats[i] = self.ln[i](tgt_feats[i])
             tgt_feats_proj.append(self.proj[i](tgt_feats[i]))
-            # tgt_feats_proj.append(self.proj[i](tgt.flatten(2).transpose(-1, -2)))
-            
+        
         
         tgt_feats = torch.stack(tgt_feats_proj, dim=1)
         attn_maps = torch.stack(attn_maps, dim=1)

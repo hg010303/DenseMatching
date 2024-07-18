@@ -12,7 +12,7 @@ from datetime import date
 import admin.settings as ws_settings
 
 
-def run_training(train_module, train_name, seed, cudnn_benchmark=True,tag=None):
+def run_training(train_module, train_name, seed, cudnn_benchmark=True,tag=None, args=None):
     """Run a train scripts in train_settings.
     args:
         train_module: Name of module in the "train_settings/" folder.
@@ -48,7 +48,7 @@ def run_training(train_module, train_name, seed, cudnn_benchmark=True,tag=None):
                                                                         train_name.replace('/', '.')))
     expr_func = getattr(expr_module, 'run')
 
-    expr_func(settings)
+    expr_func(settings, args=args)
 
 
 def main():
@@ -59,6 +59,10 @@ def main():
     parser.add_argument('--cudnn_benchmark', type=bool, default=True,
                         help='Set cudnn benchmark on (1) or off (0) (default is on).')
     parser.add_argument('--seed', type=int, default=1992, help='Pseudo-RNG seed')
+    parser.add_argument('--lr', type=float, default=None, help='Learning rate')
+    parser.add_argument('--correlation', action='store_true', help='Correlation')
+    # parser.add_argument('--')
+    
     args = parser.parse_args()
 
     # args.seed = random.randint(0, 3000000)
@@ -69,7 +73,7 @@ def main():
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
 
-    run_training(args.train_module, args.train_name, cudnn_benchmark=args.cudnn_benchmark, seed=args.seed,tag=args.tag)
+    run_training(args.train_module, args.train_name, cudnn_benchmark=args.cudnn_benchmark, seed=args.seed,tag=args.tag, args=args)
 
 
 if __name__ == '__main__':
