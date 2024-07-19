@@ -25,7 +25,7 @@ from models.croco.pos_embed import interpolate_pos_embed
 def run(settings, args=None):
     settings.description = 'Default train settings for GLU-Net on the dynamic dataset (from GOCor paper)'
     settings.data_mode = 'local'
-    settings.batch_size = 36 #24
+    settings.batch_size = 16 #24
     settings.n_threads = 8
     settings.multi_gpu = False
     settings.print_interval = 100
@@ -118,7 +118,8 @@ def run(settings, args=None):
     croco_args['img_size'] = ((224//32)*32,(224//32)*32)
     croco_args['cost_agg'] = True
     croco_args['output_interp'] = True
-    croco_args['correlation'] = args.correlation
+    croco_args['args'] = args
+    croco_args['cost_transformer']=True
 
     model = CroCoNet(**croco_args)
     # head = PixelwiseTaskWithDPT()
@@ -159,7 +160,6 @@ def run(settings, args=None):
         optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),
                    lr=settings.lr,
                    weight_decay=0.0004)
-
     # 8. Define Scheduler
     scheduler = lr_scheduler.MultiStepLR(optimizer,
                                          milestones=settings.scheduler_steps,

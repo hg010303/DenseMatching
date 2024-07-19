@@ -40,7 +40,7 @@ class CroCoNet(nn.Module):
                  output_interp=False,
                  inv=False,
                  cost_transformer=True,
-                 **kwargs,
+                 args=None,
                 ):
                 
         super(CroCoNet, self).__init__()
@@ -48,9 +48,11 @@ class CroCoNet(nn.Module):
         self.cost_agg = cost_agg
         self.attn_map_output = attn_map_output or cost_agg
         self.cost_transformer=cost_transformer
-        self.kwargs = kwargs
+        self.kwargs = args
+        
+        self.reciprocity = getattr(args, 'reciprocity', False)
         if self.cost_agg:
-            self.cats = CATs(feature_size=14, hyperpixel_ids = [i for i in range(0, 12)], output_interp=output_interp,inv=inv, cost_transformer=cost_transformer, kwargs=kwargs)
+            self.cats = CATs(feature_size=14, hyperpixel_ids = [i for i in range(0, 12)], output_interp=output_interp,inv=inv, cost_transformer=cost_transformer, args=args)
                 
         # patch embeddings  (with initialization done as in MAE)
         self._set_patch_embed(img_size, patch_size, enc_embed_dim)
@@ -131,12 +133,12 @@ class CroCoNet(nn.Module):
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            # we use xavier_uniform following official JAX ViT:
-            torch.nn.init.xavier_uniform_(m.weight)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
+        # if isinstance(m, nn.Linear):
+        #     # we use xavier_uniform following official JAX ViT:
+        #     torch.nn.init.xavier_uniform_(m.weight)
+        #     if isinstance(m, nn.Linear) and m.bias is not None:
+        #         nn.init.constant_(m.bias, 0)
+        if isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
             
@@ -264,6 +266,8 @@ class CroCoNet(nn.Module):
         # decoder
         if self.attn_map_output:
             decfeat, attn_map = self._decoder(feat_target, pos_target, mask_target, feat_source, pos_source, return_all_blocks=True)
+            if self.reciprocity:
+                decfeat_source, attn_map_source = self._decoder(feat_source, pos_source, mask1, feat_target, pos_target, return_all_blocks=True)
         else:
             decfeat = self._decoder(feat_target, pos_target, mask_target, feat_source, pos_source)
         
@@ -272,16 +276,20 @@ class CroCoNet(nn.Module):
             attn_map[i][:,:,0]=attn_map[i].min()
         
         self.attn_map = attn_map
-        
-        # prediction head 
-        # out = self.prediction_head(decfeat)
-        # get target
-        # target = self.patchify(img1)
         target=None
+        if self.reciprocity:
+            attn_map_source = [attn.mean(dim=1).detach() for attn in attn_map_source]
+            for i in range(len(attn_map_source)):
+                attn_map_source[i][:,:,0]=attn_map_source[i].min()    
+            
         
         if self.cost_agg:
             decfeat = [feat.detach() for feat in decfeat]
-            out = self.cats(attn_map, decfeat, (H,W), feat_source, feat_target)
+            if self.reciprocity:
+                decfeat_source = [feat.detach() for feat in decfeat_source]
+                out = self.cats(attn_map, decfeat, (H,W), feat_source, feat_target, attn_map_source, decfeat_source)
+            else:
+                out = self.cats(attn_map, decfeat, (H,W), feat_source, feat_target)
             
             return out
         return out, mask1, target

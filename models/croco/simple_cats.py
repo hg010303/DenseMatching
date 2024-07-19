@@ -149,7 +149,7 @@ class TransformerAggregator(nn.Module):
         # x = self.proj(self.blocks(x)).transpose(-1, -2) + corr  # swapping the axis for swapping self-attention.
         
         x = torch.cat((x, source), dim=3) + pos_embed
-        x = self.proj(self.blocks(x)) * 0.1 + attn_maps 
+        x = self.proj(self.blocks(x)) + attn_maps 
 
         return x.mean(1)
 
@@ -223,20 +223,26 @@ class CATs(nn.Module):
     output_interp=False,
     inv=False,
     cost_transformer=True,
-    **kwargs):
+    args=None):
         super().__init__()
         self.feature_size = feature_size
         self.feature_proj_dim = feature_proj_dim
         self.decoder_embed_dim = self.feature_size ** 2 + self.feature_proj_dim
         self.inv=inv
         self.cost_transformer=cost_transformer
-        self.kwargs=kwargs
-        self.correlation = getattr(kwargs,'correlation',False)
+        self.args=args
+        self.correlation = getattr(args,'correlation',False)
+        self.reciprocity = getattr(args,'reciprocity',False)
 
-        channels = [768]*13 if self.correlation else [768]*12
+        channels = [768]*12
+        if self.correlation:
+            channels = [1024]+channels
+            hyperpixel_ids = hyperpixel_ids + [12]
 
         # self.feature_extraction = FeatureExtractionHyperPixel(hyperpixel_ids, feature_size, freeze)
         self.ln = nn.ModuleList([nn.LayerNorm(channels[i]) for i in hyperpixel_ids])
+        if self.reciprocity:
+            self.ln_src = nn.ModuleList([nn.LayerNorm(channels[i]) for i in hyperpixel_ids])
         self.bn = nn.ModuleList([nn.BatchNorm1d(channels[i]) for i in hyperpixel_ids])
         
         self.proj = nn.ModuleList([ 
@@ -298,36 +304,50 @@ class CATs(nn.Module):
     def corr(self, src, trg):
         return src.flatten(2).transpose(-1, -2) @ trg.flatten(2)
 
-    def forward(self, attn_maps, tgt_feats,output_shape, feat_source, feat_target):
+    def forward(self, attn_maps, tgt_feats,output_shape, feat_source, feat_target, attn_maps_source=None, src_feats=None):
         B, _,_ = tgt_feats[0].size()
 
-        tgt_feats_proj = []
+        tgt_feats_proj, src_feats_proj = [],[]
         
         if self.correlation:
             corr = self.corr(self.l2norm(feat_target.permute(0,2,1)),self.l2norm(feat_source.permute(0,2,1)))
             attn_maps = [corr] + attn_maps
             tgt_feats = [feat_target] + tgt_feats
+            
+            if self.reciprocity:
+                corr = corr.transpose(-1,-2)
+                attn_maps_source = [corr] + attn_maps_source
+                src_feats = [feat_source] + src_feats
         
         for i in range(len(self.proj)):
             B,L,C = tgt_feats[i].shape
             
             tgt_feats[i] = self.ln[i](tgt_feats[i])
             tgt_feats_proj.append(self.proj[i](tgt_feats[i]))
+            
+            if self.reciprocity:
+                src_feats[i] = self.ln_src[i](src_feats[i])
+                src_feats_proj.append(self.proj[i](src_feats[i]))
         
         
         tgt_feats = torch.stack(tgt_feats_proj, dim=1)
         attn_maps = torch.stack(attn_maps, dim=1)
         # attn_maps = self.mutual_nn_filter(attn_maps)
-
         refined_corr = self.decoder(attn_maps, tgt_feats)
+        
+        if self.reciprocity:
+            src_feats = torch.stack(src_feats_proj, dim=1)
+            attn_maps_source = torch.stack(attn_maps_source, dim=1)
+            refined_corr_source = self.decoder(attn_maps_source, src_feats)
+            refined_corr = (refined_corr + refined_corr_source.transpose(-1,-2)) / 2
+        
         if not self.cost_transformer:
-            refined_corr = attn_maps.mean(dim=1) ## target source
+            # refined_corr = attn_maps.mean(dim=1) ## target source
+            refined_corr = (attn_maps.mean(dim=1) + attn_maps_source.mean(dim=1).transpose(-1,-2))/2.
             # refined_corr = self.corr(self.l2norm(feat_target.permute(0,2,1)),self.l2norm(feat_source.permute(0,2,1)))
 
-        if self.inv:
-            grid_x, grid_y = self.soft_argmax(refined_corr.view(B, -1, self.feature_size, self.feature_size))
-        else:
-            grid_x, grid_y = self.soft_argmax(refined_corr.transpose(-1,-2).view(B, -1, self.feature_size, self.feature_size),beta=2e-2)
+
+        grid_x, grid_y = self.soft_argmax(refined_corr.transpose(-1,-2).view(B, -1, self.feature_size, self.feature_size),beta=2e-2)
         self.grid_x = grid_x
         self.grid_y = grid_y
 

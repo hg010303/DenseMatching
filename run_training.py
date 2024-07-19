@@ -61,6 +61,7 @@ def main():
     parser.add_argument('--seed', type=int, default=1992, help='Pseudo-RNG seed')
     parser.add_argument('--lr', type=float, default=None, help='Learning rate')
     parser.add_argument('--correlation', action='store_true', help='Correlation')
+    parser.add_argument('--reciprocity', action='store_true', help='Reciprocity')
     # parser.add_argument('--')
     
     args = parser.parse_args()

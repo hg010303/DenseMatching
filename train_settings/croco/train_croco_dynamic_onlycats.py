@@ -23,7 +23,7 @@ from models.croco.pos_embed import interpolate_pos_embed
 from models.semantic_matching_models.cats import CATs
 
 
-def run(settings):
+def run(settings,args=None):
     settings.description = 'Default train settings for GLU-Net on the dynamic dataset (from GOCor paper)'
     settings.data_mode = 'local'
     settings.batch_size = 24 #24
@@ -142,7 +142,7 @@ def run(settings):
         optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),
                    lr=settings.lr,
                    weight_decay=0.0004)
-
+    
     # 8. Define Scheduler
     scheduler = lr_scheduler.MultiStepLR(optimizer,
                                          milestones=settings.scheduler_steps,

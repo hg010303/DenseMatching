@@ -16,7 +16,7 @@ from models.GLUNet.GLU_Net import glunet_vgg16
 from datasets.load_pre_made_datasets.load_pre_made_dataset import PreMadeDataset
 
 
-def run(settings):
+def run(settings, args=None):
     settings.description = 'Default train settings for GLU-Net on the DPED-CityScape-ADE dataset (also referred ' \
                            'to as static in GOCor paper)'
     settings.data_mode = 'local'
@@ -41,7 +41,8 @@ def run(settings):
                                       flow_transform=flow_transform,
                                       co_transform=co_transform,
                                       split=1,
-                                      get_mapping=False)
+                                      get_mapping=False,
+                                      img_size=(224,224))
 
     # validation dataset
     _, val_dataset = PreMadeDataset(root=settings.env.validation_cad_520,
@@ -49,7 +50,8 @@ def run(settings):
                                     target_image_transform=img_transforms,
                                     flow_transform=flow_transform,
                                     co_transform=co_transform,
-                                    split=0)
+                                    split=0,
+                                    img_size=(224,224))
 
     # 2. Define dataloaders
     train_loader = Loader('train', train_dataset, batch_size=settings.batch_size, shuffle=True,
