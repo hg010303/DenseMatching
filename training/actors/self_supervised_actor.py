@@ -261,7 +261,92 @@ class CrocoBasedActor(BaseActor):
         mini_batch['source_image'] = resize_image(mini_batch['source_image'])
 
         output_net_original = self.net(mini_batch['target_image'], mini_batch['source_image'])
-        
+
+        loss_o, stats_o = self.objective(output_net_original, mini_batch['flow_map'], mask=mini_batch['mask'])
+        # loss_256, stats_256 = self.objective_256(output_net_256, mini_batch['flow_map_256'], mask=mini_batch['mask_256'])
+        # loss = loss_o + loss_256
+        loss = loss_o
+
+        # Log stats
+        stats = stats_o
+        stats['Loss_H_Net/total'] = loss_o.item()
+        stats['Loss/total'] = loss.item()
+
+        # Calculates validation stats
+        if not training:
+            b, _, h_original, w_original = mini_batch['flow_map'].shape
+            # for index_reso_original in range(len(output_net_original)):
+            if isinstance(output_net_original, dict):
+                EPE, PCK_1, PCK_3, PCK_5 = real_metrics(output_net_original['flow_estimates'][0],
+                                                        mini_batch['flow_map'], mini_batch['correspondence_mask'])
+                h_, w_ = output_net_original['flow_estimates'][0].shape[-2:]
+            else:
+                EPE, PCK_1, PCK_3, PCK_5 = real_metrics(output_net_original,
+                                                        mini_batch['flow_map'], mini_batch['correspondence_mask'])
+                h_, w_ = output_net_original.shape[-2:]#[-(index_reso_original+1)].shape[-2:]
+            stats['EPE_HNet_reso_{}x{}/EPE'.format(h_, w_)] = EPE.item()
+            stats['PCK_1_HNet_reso_{}x{}/EPE'.format(h_, w_)] = PCK_1.item()
+            stats['PCK_3_HNet_reso_{}x{}/EPE'.format(h_, w_)] = PCK_3.item()
+            stats['PCK_5_HNet_reso_{}x{}/EPE'.format(h_, w_)] = PCK_5.item()
+
+
+            if self.best_val_epe:
+                stats['best_value'] = stats['EPE_HNet_reso_{}x{}/EPE'.format(h_, w_)]
+            else:
+                stats['best_value'] = - stats['PCK_1_HNet_reso_{}x{}/EPE'.format(h_, w_)]
+
+        # plot images
+        if iter < self.nbr_images_to_plot:
+            training_or_validation = 'train' if training else 'val'
+            base_save_dir = os.path.join(mini_batch['settings'].env.workspace_dir,
+                                         mini_batch['settings'].project_path,
+                                         'plot', training_or_validation)
+            if not os.path.isdir(base_save_dir):
+                os.makedirs(base_save_dir)
+
+            if mini_batch['sparse'][0]:
+                output_net_256 = output_net_original
+                _ = plot_sparse_keypoints_GLUNet(base_save_dir, epoch, iter,
+                                                 mini_batch['source_image'], mini_batch['target_image'],
+                                                 mini_batch['source_image_256'], mini_batch['target_image'],
+                                                 mini_batch['flow_map'], mini_batch['flow_map'],
+                                                 output_net_original,
+                                                 output_net_256,
+                                                 normalization=True,
+                                                 uncertainty_info_original=output_net_original['uncertainty_estimates'][
+                                                     -1] if 'uncertainty_estimates' in list(output_net_original.keys()) else None,
+                                                 uncertainty_info_256=output_net_256['uncertainty_estimates'][-1]
+                                                 if 'uncertainty_estimates' in list(output_net_original.keys()) else None)
+                
+                ## if output_net_original type is dict
+                if isinstance(output_net_original, dict):
+                    _ = plot_during_training_with_uncertainty(base_save_dir, epoch, iter,
+                                            mini_batch['source_image'], mini_batch['target_image'],
+                                            mini_batch['source_image'],
+                                            mini_batch['target_image'],
+                                            mini_batch['flow_map'], mini_batch['flow_map'],
+                                            output_net=output_net_original['flow_estimates'][-1],
+                                            output_net_256=output_net_original['flow_estimates'][-1],
+                                            mask=mini_batch['mask'], mask_256=mini_batch['mask'],
+                                            uncertainty_info_original= None,
+                                            uncertainty_info_256= None)
+                else:
+                    _ = plot_during_training_with_uncertainty(base_save_dir, epoch, iter,
+                                            mini_batch['source_image'], mini_batch['target_image'],
+                                            mini_batch['source_image'],
+                                            mini_batch['target_image'],
+                                            mini_batch['flow_map'], mini_batch['flow_map'],
+                                            output_net=output_net_original,
+                                            output_net_256=output_net_original,
+                                            mask=mini_batch['mask'], mask_256=mini_batch['mask'],
+                                            uncertainty_info_original= None,
+                                            uncertainty_info_256= None)
+
+        return loss, stats
+
+
+#### visualize tools
+
         
 
         
@@ -324,107 +409,3 @@ class CrocoBasedActor(BaseActor):
         # output_net_original = F.interpolate(output_net_original, size=(mini_batch['flow_map'].shape[-2], mini_batch['flow_map'].shape[-1]), mode='bilinear')
         # output_net_256, output_net_original = self.net(mini_batch['target_image'], mini_batch['source_image'],
         #                                                mini_batch['target_image_256'], mini_batch['source_image_256'])
-        loss_o, stats_o = self.objective(output_net_original, mini_batch['flow_map'], mask=mini_batch['mask'])
-        # loss_256, stats_256 = self.objective_256(output_net_256, mini_batch['flow_map_256'], mask=mini_batch['mask_256'])
-        # loss = loss_o + loss_256
-        loss = loss_o
-
-        # Log stats
-        # stats = merge_dictionaries([stats_o, stats_256])
-        stats = stats_o
-        stats['Loss_H_Net/total'] = loss_o.item()
-        # stats['Loss_L_Net/total'] = loss_256.item()
-        stats['Loss/total'] = loss.item()
-
-        # Calculates validation stats
-        if not training:
-            b, _, h_original, w_original = mini_batch['flow_map'].shape
-            # for index_reso_original in range(len(output_net_original)):
-            if isinstance(output_net_original, dict):
-                EPE, PCK_1, PCK_3, PCK_5 = real_metrics(output_net_original['flow_estimates'][0],
-                                                        mini_batch['flow_map'], mini_batch['correspondence_mask'])
-                h_, w_ = output_net_original['flow_estimates'][0].shape[-2:]
-            else:
-                EPE, PCK_1, PCK_3, PCK_5 = real_metrics(output_net_original,
-                                                        mini_batch['flow_map'], mini_batch['correspondence_mask'])
-                h_, w_ = output_net_original.shape[-2:]#[-(index_reso_original+1)].shape[-2:]
-            stats['EPE_HNet_reso_{}x{}/EPE'.format(h_, w_)] = EPE.item()
-            stats['PCK_1_HNet_reso_{}x{}/EPE'.format(h_, w_)] = PCK_1.item()
-            stats['PCK_3_HNet_reso_{}x{}/EPE'.format(h_, w_)] = PCK_3.item()
-            stats['PCK_5_HNet_reso_{}x{}/EPE'.format(h_, w_)] = PCK_5.item()
-
-            # for index_reso_256 in range(len(output_net_256['flow_estimates'])):
-            #     EPE = realEPE(output_net_256['flow_estimates'][-(index_reso_256+1)], mini_batch['flow_map'],
-            #                   mini_batch['correspondence_mask'],
-            #                   ratio_x=float(w_original) / 256.0,
-            #                   ratio_y=float(h_original) / 256.0)
-            #     h_, w_ = output_net_256['flow_estimates'][-(index_reso_256+1)].shape[-2:]
-            #     stats['EPE_LNet_reso_{}x{}/EPE'.format(h_, w_)] = EPE.item()
-
-            if self.best_val_epe:
-                stats['best_value'] = stats['EPE_HNet_reso_{}x{}/EPE'.format(h_, w_)]
-            else:
-                stats['best_value'] = - stats['PCK_1_HNet_reso_{}x{}/EPE'.format(h_, w_)]
-
-        # plot images
-        if iter < self.nbr_images_to_plot:
-            training_or_validation = 'train' if training else 'val'
-            base_save_dir = os.path.join(mini_batch['settings'].env.workspace_dir,
-                                         mini_batch['settings'].project_path,
-                                         'plot', training_or_validation)
-            if not os.path.isdir(base_save_dir):
-                os.makedirs(base_save_dir)
-
-            if mini_batch['sparse'][0]:
-                output_net_256 = output_net_original
-                _ = plot_sparse_keypoints_GLUNet(base_save_dir, epoch, iter,
-                                                 mini_batch['source_image'], mini_batch['target_image'],
-                                                 mini_batch['source_image_256'], mini_batch['target_image'],
-                                                 mini_batch['flow_map'], mini_batch['flow_map'],
-                                                 output_net_original,
-                                                 output_net_256,
-                                                 normalization=True,
-                                                 uncertainty_info_original=output_net_original['uncertainty_estimates'][
-                                                     -1] if 'uncertainty_estimates' in list(output_net_original.keys()) else None,
-                                                 uncertainty_info_256=output_net_256['uncertainty_estimates'][-1]
-                                                 if 'uncertainty_estimates' in list(output_net_original.keys()) else None)
-            else:
-                # _ = plot_during_training_with_uncertainty(base_save_dir, epoch, iter,
-                #                                           mini_batch['source_image'], mini_batch['target_image'],
-                #                                           mini_batch['source_image_256'],
-                #                                           mini_batch['target_image_256'],
-                #                                           mini_batch['flow_map'], mini_batch['flow_map_256'],
-                #                                           output_net=output_net_original['flow_estimates'][-1],
-                #                                           output_net_256=output_net_256['flow_estimates'][-1],
-                #                                           mask=mini_batch['mask'], mask_256=mini_batch['mask_256'],
-                #                                           uncertainty_info_original=
-                #                                           output_net_original['uncertainty_estimates'][-1] if
-                #                                           'uncertainty_estimates' in list(output_net_original.keys()) else None,
-                #                                           uncertainty_info_256=output_net_256['uncertainty_estimates'][-1]
-                #                                           if 'uncertainty_estimates' in list(output_net_original.keys()) else None)
-
-                ## if output_net_original type is dict
-                if isinstance(output_net_original, dict):
-                    _ = plot_during_training_with_uncertainty(base_save_dir, epoch, iter,
-                                            mini_batch['source_image'], mini_batch['target_image'],
-                                            mini_batch['source_image'],
-                                            mini_batch['target_image'],
-                                            mini_batch['flow_map'], mini_batch['flow_map'],
-                                            output_net=output_net_original['flow_estimates'][-1],
-                                            output_net_256=output_net_original['flow_estimates'][-1],
-                                            mask=mini_batch['mask'], mask_256=mini_batch['mask'],
-                                            uncertainty_info_original= None,
-                                            uncertainty_info_256= None)
-                else:
-                    _ = plot_during_training_with_uncertainty(base_save_dir, epoch, iter,
-                                            mini_batch['source_image'], mini_batch['target_image'],
-                                            mini_batch['source_image'],
-                                            mini_batch['target_image'],
-                                            mini_batch['flow_map'], mini_batch['flow_map'],
-                                            output_net=output_net_original,
-                                            output_net_256=output_net_original,
-                                            mask=mini_batch['mask'], mask_256=mini_batch['mask'],
-                                            uncertainty_info_original= None,
-                                            uncertainty_info_256= None)
-
-        return loss, stats

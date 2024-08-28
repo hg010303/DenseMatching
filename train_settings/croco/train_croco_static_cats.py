@@ -32,63 +32,13 @@ def run(settings, args=None):
     settings.lr = 0.0001 if args.lr == None else args.lr
     settings.scheduler_steps = [100, 120, 130]
     settings.n_epochs = 150
+    
     # 1. Define training and validation datasets
     # datasets, pre-processing of the images is done within the network function !
-
     img_transforms = transforms.Compose([ArrayToTensor(get_float=False)])
     flow_transform = transforms.Compose([ArrayToTensor()])  # just put channels first and put it to float
-    ## reshape image to 256 256
-    # co_transform = transforms.Compose([transforms.Resize((256, 256))])
     co_transform = None
 
-    # geometric transformation for moving objects
-    fg_tform = RandomAffine(p_flip=0.0, max_rotation=30.0,
-                            max_shear=0, max_ar_factor=0.,
-                            max_scale=0.3, pad_amount=0)
-
-    # object dataset
-    min_target_area = 1300
-    coco_dataset_train = MSCOCO(root=settings.env.coco, split='train', version='2014',
-                                min_area=min_target_area)
-
-    # base training data is DPED-CityScape-ADE + 1 object from COCO
-    # train_dataset, _ = PreMadeDataset(root=settings.env.training_cad_520,
-    #                                   source_image_transform=None,
-    #                                   target_image_transform=None,
-    #                                   flow_transform=None,
-    #                                   co_transform=None,
-    #                                   split=1)  # only training
-
-    # # we then adds the object on the dataset
-    # train_dataset = AugmentedImagePairsDatasetMultipleObjects(foreground_image_dataset=coco_dataset_train,
-    #                                                           background_image_dataset=train_dataset,
-    #                                                           foreground_transform=fg_tform,
-    #                                                           number_of_objects=1, object_proba=0.8,
-    #                                                           source_image_transform=img_transforms,
-    #                                                           target_image_transform=img_transforms,
-    #                                                           flow_transform=flow_transform,
-    #                                                           co_transform=co_transform,
-    #                                                           image_size=(224,224)
-    #                                                           )
-
-    # # validation dataset: DPED-CityScape-ADE + 1 object from COCO
-    # _, val_dataset = PreMadeDataset(root=settings.env.validation_cad_520,
-    #                                 source_image_transform=None,
-    #                                 target_image_transform=None,
-    #                                 flow_transform=None,
-    #                                 co_transform=None,
-    #                                 split=0)
-
-    # val_dataset = AugmentedImagePairsDatasetMultipleObjects(foreground_image_dataset=coco_dataset_train,
-    #                                                         background_image_dataset=val_dataset,
-    #                                                         number_of_objects=1, object_proba=0.8,
-    #                                                         foreground_transform=fg_tform,
-    #                                                         source_image_transform=img_transforms,
-    #                                                         target_image_transform=img_transforms,
-    #                                                         flow_transform=flow_transform,
-    #                                                         co_transform=co_transform,
-    #                                                         image_size=(224,224))
-    
     train_dataset, _ = PreMadeDataset(root=settings.env.training_cad_520,
                                       source_image_transform=img_transforms,
                                       target_image_transform=img_transforms,
@@ -116,23 +66,14 @@ def run(settings, args=None):
     ckpt = torch.load(settings.env.croco_pretrained_path,'cpu')
     croco_args = croco_args_from_ckpt(ckpt)
     croco_args['img_size'] = ((224//32)*32,(224//32)*32)
-    croco_args['cost_agg'] = True
-    croco_args['output_interp'] = True
     croco_args['args'] = args
-    croco_args['cost_transformer']=True
 
     model = CroCoNet(**croco_args)
-    # head = PixelwiseTaskWithDPT()
-    # head.num_channels = 2
-    # model = CroCoDownstreamBinocular(head, **croco_args)
-    # interpolate_pos_embed(network,ckpt['model'])
     model.load_state_dict(ckpt['model'], strict=False)
     for key,value in model.named_parameters():
         if 'cats' not in key:
             value.requires_grad = False
             
-            
-
     # but better results are obtained with using simple bilinear interpolation instead of deconvolutions.
     print(colored('==> ', 'blue') + 'model created.')
 
@@ -169,9 +110,3 @@ def run(settings, args=None):
     trainer = MatchingTrainer(CrocoActor, [train_loader, val_loader], optimizer, settings, lr_scheduler=scheduler)
 
     trainer.train(settings.n_epochs, load_latest=True, fail_safe=True)
-
-
-
-
-
-

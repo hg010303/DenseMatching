@@ -218,6 +218,8 @@ def select_model(model_name, pre_trained_model_type, arguments, global_optim_ite
         # similar to original work, we use softargmax as the inference_strategy. This is because the kp loss is the
         # EPE after applying softargmax.
         network = CATs(forward_pass_strategy='flow_prediction', inference_strategy='softargmax',cost_transformer=False)
+
+
     elif model_name == 'croco':
         ckpt = torch.load(path_to_pre_trained_models,'cpu')
         croco_args = croco_args_from_ckpt(ckpt)
@@ -233,7 +235,6 @@ def select_model(model_name, pre_trained_model_type, arguments, global_optim_ite
         ckpt_args = ckpt['args']
         ckpt_args.croco_args['img_size'] = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
         ckpt_args.crop = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
-
 
         head = PixelwiseTaskWithDPT()
         head.num_channels = 3

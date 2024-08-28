@@ -62,12 +62,12 @@ def main():
     parser.add_argument('--lr', type=float, default=None, help='Learning rate')
     parser.add_argument('--correlation', action='store_true', help='Correlation')
     parser.add_argument('--reciprocity', action='store_true', help='Reciprocity')
-    parser.add_argument('--softmaxattn', action='store_true')
-    # parser.add_argument('--')
+    parser.add_argument('--softmaxattn', action='store_true', help= 'Get attention map after softmax')
+    parser.add_argument('--cost_agg', action='store_true', help='Cost aggregation')
+    parser.add_argument('--cost_transformer', action='store_true', help='Cost transformer')
     
     args = parser.parse_args()
 
-    # args.seed = random.randint(0, 3000000)
     args.seed = torch.initial_seed() & (2 ** 32 - 1)
     print('Seed is {}'.format(args.seed))
     random.seed(int(args.seed))

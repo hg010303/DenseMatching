@@ -220,16 +220,13 @@ class CATs(nn.Module):
     num_heads=6,
     mlp_ratio=4,
     hyperpixel_ids=[0,8,20,21,26,28,29,30],
-    freeze=True,
     output_interp=False,
-    inv=False,
     cost_transformer=True,
     args=None):
         super().__init__()
         self.feature_size = feature_size
         self.feature_proj_dim = feature_proj_dim
         self.decoder_embed_dim = self.feature_size ** 2 + self.feature_proj_dim
-        self.inv=inv
         self.cost_transformer=cost_transformer
         self.args=args
         self.correlation = getattr(args,'correlation',False)
@@ -244,7 +241,6 @@ class CATs(nn.Module):
         self.ln = nn.ModuleList([nn.LayerNorm(channels[i]) for i in hyperpixel_ids])
         if self.reciprocity:
             self.ln_src = nn.ModuleList([nn.LayerNorm(channels[i]) for i in hyperpixel_ids])
-        self.bn = nn.ModuleList([nn.BatchNorm1d(channels[i]) for i in hyperpixel_ids])
         
         self.proj = nn.ModuleList([ 
             nn.Linear(channels[i], self.feature_proj_dim) for i in hyperpixel_ids

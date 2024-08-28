@@ -36,23 +36,21 @@ class CroCoNet(nn.Module):
                  norm_im2_in_dec=True,   # whether to apply normalization of the 'memory' = (second image) in the decoder 
                  pos_embed='cosine',     # positional embedding (either cosine or RoPE100)
                  attn_map_output=False,  # whether to output the attention maps
-                 cost_agg=False,
-                 output_interp=False,
-                 inv=False,
-                 cost_transformer=True,
+                 output_interp=True,
                  args=None,
                 ):
                 
         super(CroCoNet, self).__init__()
          
-        self.cost_agg = cost_agg
-        self.attn_map_output = attn_map_output or cost_agg
-        self.cost_transformer=cost_transformer
+        self.cost_agg = args.cost_agg
+        self.attn_map_output = attn_map_output or self.cost_agg
+        self.cost_transformer = args.cost_transformer
         self.kwargs = args
+        
         
         self.reciprocity = getattr(args, 'reciprocity', False)
         if self.cost_agg:
-            self.cats = CATs(feature_size=14, hyperpixel_ids = [i for i in range(0, 12)], output_interp=output_interp,inv=inv, cost_transformer=cost_transformer, args=args)
+            self.cats = CATs(feature_size=14, hyperpixel_ids = [i for i in range(0, 12)], output_interp=output_interp, cost_transformer=self.cost_transformer, args=args)
                 
         # patch embeddings  (with initialization done as in MAE)
         self._set_patch_embed(img_size, patch_size, enc_embed_dim)
@@ -220,7 +218,7 @@ class CroCoNet(nn.Module):
             
         if self.attn_map_output:
             return out, attn_maps
-        return out
+        return out, None
 
     def patchify(self, imgs):
         """
@@ -260,23 +258,19 @@ class CroCoNet(nn.Module):
         """
         B,_,H,W = img_target.size()
         feat_target, pos_target, mask_target = self._encode_image(img_target, do_mask=False)
-        # encoder of the masked first image 
-        feat_source, pos_source, mask1 = self._encode_image(img_source, do_mask=False)
-        # encoder of the second image 
+        feat_source, pos_source, mask_source = self._encode_image(img_source, do_mask=False)
+
         # decoder
-        if self.attn_map_output:
-            decfeat, attn_map = self._decoder(feat_target, pos_target, mask_target, feat_source, pos_source, return_all_blocks=True)
-            if self.reciprocity:
-                decfeat_source, attn_map_source = self._decoder(feat_source, pos_source, mask1, feat_target, pos_target, return_all_blocks=True)
-        else:
-            decfeat = self._decoder(feat_target, pos_target, mask_target, feat_source, pos_source)
+        decfeat, attn_map = self._decoder(feat_target, pos_target, mask_target, feat_source, pos_source, return_all_blocks=True)
+        if self.reciprocity:
+            decfeat_source, attn_map_source = self._decoder(feat_source, pos_source, mask_source, feat_target, pos_target, return_all_blocks=True)
         
+        
+        ## heuristic attention refine
         attn_map = [attn.mean(dim=1).detach() for attn in attn_map]
         for i in range(len(attn_map)):
             attn_map[i][:,:,0]=attn_map[i].min()
-        
         self.attn_map = attn_map
-        target=None
         if self.reciprocity:
             attn_map_source = [attn.mean(dim=1).detach() for attn in attn_map_source]
             for i in range(len(attn_map_source)):
@@ -292,4 +286,4 @@ class CroCoNet(nn.Module):
                 out = self.cats(attn_map, decfeat, (H,W), feat_source, feat_target)
             
             return out
-        return out, mask1, target
+        return out, mask_target, None
