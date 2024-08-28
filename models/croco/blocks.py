@@ -131,7 +131,7 @@ class Block(nn.Module):
 
 class CrossAttention(nn.Module):
     
-    def __init__(self, dim, rope=None, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, rope=None, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., softmaxattn=False):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -144,6 +144,7 @@ class CrossAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
         
+        self.softmaxattn= softmaxattn
         self.rope = rope
         self.attn_map = None
         self.attn_map_tmp = None
@@ -183,7 +184,8 @@ class CrossAttention(nn.Module):
         attn_tmp = attn.clone().detach()  
         
         attn = attn.softmax(dim=-1)
-        
+        if self.softmaxattn:
+            attn_tmp = attn.clone().detach()
 
         attn = self.attn_drop(attn)
 
@@ -195,11 +197,11 @@ class CrossAttention(nn.Module):
 class DecoderBlock(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, norm_mem=True, rope=None):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, norm_mem=True, rope=None, softmaxattn=False):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(dim, rope=rope, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
-        self.cross_attn = CrossAttention(dim, rope=rope, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
+        self.cross_attn = CrossAttention(dim, rope=rope, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop, softmaxattn=softmaxattn)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         self.norm3 = norm_layer(dim)
