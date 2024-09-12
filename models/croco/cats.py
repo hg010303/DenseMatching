@@ -12,9 +12,7 @@ from timm.models.layers import DropPath, trunc_normal_
 import torchvision.models as models
 
 # from models.feature_backbones import resnet
-from models.croco.mod import FeatureL2Norm, unnormalise_and_convert_mapping_to_flow
-from models.croco.SCOT.rhm_map import rhm
-from models.croco.SCOT.geometry import gaussian2d, center, receptive_fields
+from .mod import FeatureL2Norm, unnormalise_and_convert_mapping_to_flow
 
 
 r'''
@@ -69,7 +67,7 @@ class Attention(nn.Module):
 
 class MultiscaleBlock(nn.Module):
 
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
+    def __init__(self, dim, num_heads, out_dim, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
         self.attn = Attention(
@@ -77,14 +75,15 @@ class MultiscaleBlock(nn.Module):
         self.attn_multiscale = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
+        self.out_dim = out_dim
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
         self.norm3 = norm_layer(dim)
         self.norm4 = norm_layer(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
-        self.mlp2 = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        mlp_hidden_dim = int(out_dim * mlp_ratio)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, out_features=out_dim, act_layer=act_layer, drop=drop)
+        self.mlp2 = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, out_features=out_dim, act_layer=act_layer, drop=drop)
 
     def forward(self, x):
         '''
@@ -95,7 +94,7 @@ class MultiscaleBlock(nn.Module):
             x = x.flatten(0, 1)
             x = x + self.drop_path(self.attn(self.norm1(x)))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
-            return x.view(B, N, H, W)
+            return x.view(B, N, H, self.out_dim)
         x = x.flatten(0, 1)
         x = x + self.drop_path(self.attn(self.norm1(x)))
         x = x + self.drop_path(self.mlp2(self.norm4(x)))
@@ -108,25 +107,24 @@ class MultiscaleBlock(nn.Module):
 
 
 class TransformerAggregator(nn.Module):
-    def __init__(self, num_hyperpixel, img_size=224, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None,
+    def __init__(self, num_hyperpixel, img_size=(12,20), embed_dim=768, depth=12, num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., norm_layer=None):
         super().__init__()
         self.img_size = img_size
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
 
-        self.pos_embed_x = nn.Parameter(torch.zeros(1, num_hyperpixel, 1, img_size, embed_dim // 2))
-        self.pos_embed_y = nn.Parameter(torch.zeros(1, num_hyperpixel, img_size, 1, embed_dim // 2))
+        self.pos_embed_x = nn.Parameter(torch.zeros(1, num_hyperpixel, 1, img_size[1], embed_dim // 2))
+        self.pos_embed_y = nn.Parameter(torch.zeros(1, num_hyperpixel, img_size[0], 1, embed_dim // 2))
         self.pos_drop = nn.Dropout(p=drop_rate)
 
-        
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.Sequential(*[
             MultiscaleBlock(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
             for i in range(depth)])
-        self.proj = nn.Linear(embed_dim, img_size ** 2)
+        self.proj = nn.Linear(embed_dim, 12*40)
         self.norm = norm_layer(embed_dim)
 
         trunc_normal_(self.pos_embed_x, std=.02)
@@ -135,7 +133,6 @@ class TransformerAggregator(nn.Module):
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            # trunc_normal_(m.weight, std=.02)
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
@@ -143,16 +140,16 @@ class TransformerAggregator(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, attn_maps, source):
-        B = attn_maps.shape[0]
-        x = attn_maps.clone()
+    def forward(self, corr, source, target):
+        B = corr.shape[0]
+        x = corr.clone()
         
-        pos_embed = torch.cat((self.pos_embed_x.repeat(1, 1, self.img_size, 1, 1), self.pos_embed_y.repeat(1, 1, 1, self.img_size, 1)), dim=4)
+        pos_embed = torch.cat((self.pos_embed_x.repeat(1, 1, self.img_size[0], 1, 1), self.pos_embed_y.repeat(1, 1, 1, self.img_size[1], 1)), dim=4)
         pos_embed = pos_embed.flatten(2, 3)
         # x = torch.cat((x.transpose(-1, -2), target), dim=3) + pos_embed
         # x = self.proj(self.blocks(x)).transpose(-1, -2) + corr  # swapping the axis for swapping self-attention.
         x = torch.cat((x, source), dim=3) + pos_embed
-        x = self.proj(self.blocks(x)) + attn_maps 
+        x = self.proj(self.blocks(x)) + corr 
 
         return x.mean(1)
 
@@ -160,7 +157,7 @@ class TransformerAggregator(nn.Module):
 class FeatureExtractionHyperPixel(nn.Module):
     def __init__(self, hyperpixel_ids, feature_size, freeze=True):
         super().__init__()
-        # self.backbone = resnet.resnet101(pretrained=True)
+        self.backbone = resnet.resnet101(pretrained=True)
         self.feature_size = feature_size
         if freeze:
             for param in self.backbone.parameters():
@@ -222,31 +219,16 @@ class CATs(nn.Module):
     num_heads=6,
     mlp_ratio=4,
     hyperpixel_ids=[0,8,20,21,26,28,29,30],
-    output_interp=False,
-    cost_transformer=True,
-    args=None):
+    freeze=True):
         super().__init__()
         self.feature_size = feature_size
         self.feature_proj_dim = feature_proj_dim
         self.decoder_embed_dim = self.feature_size ** 2 + self.feature_proj_dim
-        self.cost_transformer=cost_transformer
-        self.args=args
-        self.correlation = getattr(args,'correlation',False)
-        self.reciprocity = getattr(args,'reciprocity',False)
-        self.scot = getattr(args,'scot',False)
-        self.occlusion_mask = getattr(args,'occlusion_mask',False)
-
-        channels = [768]*12
-        if self.correlation:
-            channels = [1024]+channels
-            hyperpixel_ids = hyperpixel_ids + [12]
-
-        # self.feature_extraction = FeatureExtractionHyperPixel(hyperpixel_ids, feature_size, freeze)
-        self.ln = nn.ModuleList([nn.LayerNorm(channels[i]) for i in hyperpixel_ids])
-        if self.reciprocity:
-            self.ln_src = nn.ModuleList([nn.LayerNorm(channels[i]) for i in hyperpixel_ids])
         
-        self.proj = nn.ModuleList([ 
+        channels = [64] + [256] * 3 + [512] * 4 + [1024] * 23 + [2048] * 3
+
+        self.feature_extraction = FeatureExtractionHyperPixel(hyperpixel_ids, feature_size, freeze)
+        self.proj = nn.ModuleList([
             nn.Linear(channels[i], self.feature_proj_dim) for i in hyperpixel_ids
         ])
 
@@ -261,8 +243,6 @@ class CATs(nn.Module):
         self.x_normal = nn.Parameter(torch.tensor(self.x_normal, dtype=torch.float, requires_grad=False))
         self.y_normal = np.linspace(-1,1,self.feature_size)
         self.y_normal = nn.Parameter(torch.tensor(self.y_normal, dtype=torch.float, requires_grad=False))
-        
-        self.output_interp = output_interp
         
     def softmax_with_temperature(self, x, beta, d = 1):
         r'''SFNet: Learning Object-aware Semantic Flow (Lee et al.)'''
@@ -305,138 +285,32 @@ class CATs(nn.Module):
     def corr(self, src, trg):
         return src.flatten(2).transpose(-1, -2) @ trg.flatten(2)
 
-    def forward(self, attn_maps, tgt_feats,output_shape, feat_source, feat_target, attn_maps_source=None, src_feats=None, tgt_img = None, src_img = None):
-        B, _,_ = tgt_feats[0].size()
+    def forward(self, target, source):
+        B, _, H, W = target.size()
 
-        tgt_feats_proj, src_feats_proj = [],[]
-        
-        if self.correlation:
-            corr = self.corr(self.l2norm(feat_target.permute(0,2,1)),self.l2norm(feat_source.permute(0,2,1)))
-            attn_maps = [corr] + attn_maps
-            tgt_feats = [feat_target] + tgt_feats
-            
-            if self.reciprocity:
-                corr = corr.transpose(-1,-2)
-                attn_maps_source = [corr] + attn_maps_source
-                src_feats = [feat_source] + src_feats
-        
-        for i in range(len(self.proj)):
-            B,L,C = tgt_feats[i].shape
-            
-            tgt_feats[i] = self.ln[i](tgt_feats[i])
-            tgt_feats_proj.append(self.proj[i](tgt_feats[i]))
-            
-            if self.reciprocity:
-                src_feats[i] = self.ln_src[i](src_feats[i])
-                src_feats_proj.append(self.proj[i](src_feats[i]))
-        
-        
+        src_feats = self.feature_extraction(source)
+        tgt_feats = self.feature_extraction(target)
+
+        corrs = []
+        src_feats_proj = []
+        tgt_feats_proj = []
+        for i, (src, tgt) in enumerate(zip(src_feats, tgt_feats)):
+            corr = self.corr(self.l2norm(src), self.l2norm(tgt))
+            corrs.append(corr)
+            src_feats_proj.append(self.proj[i](src.flatten(2).transpose(-1, -2)))
+            tgt_feats_proj.append(self.proj[i](tgt.flatten(2).transpose(-1, -2)))
+
+        src_feats = torch.stack(src_feats_proj, dim=1)
         tgt_feats = torch.stack(tgt_feats_proj, dim=1)
-        attn_maps = torch.stack(attn_maps, dim=1)
-        # attn_maps = self.mutual_nn_filter(attn_maps)
-        refined_corr = self.decoder(attn_maps, tgt_feats)
+        corr = torch.stack(corrs, dim=1)
         
-        if self.reciprocity:
-            src_feats = torch.stack(src_feats_proj, dim=1)
-            attn_maps_source = torch.stack(attn_maps_source, dim=1)
-            refined_corr_source = self.decoder(attn_maps_source, src_feats)
-            refined_corr_target = refined_corr
-            refined_corr = (refined_corr + refined_corr_source.transpose(-1,-2)) / 2
-        
-        if not self.cost_transformer:
-            refined_corr = attn_maps.mean(dim=1) ## target source
-            # refined_corr = (attn_maps.mean(dim=1) + attn_maps_source.mean(dim=1).transpose(-1,-2))/2.
-            # refined_corr = self.corr(self.l2norm(feat_target.permute(0,2,1)),self.l2norm(feat_source.permute(0,2,1)))
-            
-        if self.scot:
-            tgt = tgt_feats[:,-1].permute(0,2,1).reshape(B,-1,self.feature_size,self.feature_size).squeeze()
-            hpgeometry = receptive_fields(8, 1, tgt.size()).to(tgt_feats.device)
-            
-            # get CAM mask
-            mask = tgt.mean(dim=0)
-            scale = 1.0
-            
-            hpos = center(hpgeometry)
-            hselect = mask[hpos[:,1].long(),hpos[:,0].long()].to(hpos.device)
-            weights = 0.5*torch.ones(196,1).to(hpos.device)
-            # weights = 0.5*torch.ones((1,1)).to(hpos.device)
-            
-            weights[hselect>0.4*scale,:] = 0.8
-            weights[hselect>0.5*scale,:] = 0.9
-            weights[hselect>0.6*scale,:] = 1.0
-            
-            target_weights = weights
+        corr = self.mutual_nn_filter(corr)
 
-            mask = src_feats[:,-1].permute(0,2,1).reshape(B,-1,self.feature_size,self.feature_size).squeeze().mean(dim=0)
+        refined_corr = self.decoder(corr, src_feats, tgt_feats)
 
-            hpos = center(hpgeometry)
-            hselect = mask[hpos[:,1].long(),hpos[:,0].long()].to(hpos.device)
-            weights = 0.5*torch.ones(196,1).to(hpos.device)
-            # weights = 0.5*torch.ones(1,1).to(hpos.device)
-            
-
-            weights[hselect>0.4*scale,:] = 0.8
-            weights[hselect>0.5*scale,:] = 0.9
-            weights[hselect>0.6*scale,:] = 1.0
-            
-            source_weights = weights
-            
-            src_hyperpixels = (hpgeometry, src_feats[:,-1].permute(0,2,1).squeeze().permute(1,0), src_img.size()[1:][::-1], source_weights)
-            tgt_hyperpixels = (hpgeometry, tgt_feats[:,-1].permute(0,2,1).squeeze().permute(1,0), tgt_img.size()[1:][::-1], target_weights)
-            
-            refined_corr = rhm(src_hyperpixels, tgt_hyperpixels, attn_maps, gaussian2d(7).to(tgt_feats[-1].device),  'OTGeo', 1.0,1.0,0.05 )
-
-
-        grid_x, grid_y = self.soft_argmax(refined_corr.transpose(-1,-2).view(B, -1, self.feature_size, self.feature_size),beta=2e-2)
-        self.grid_x = grid_x
-        self.grid_y = grid_y
+        grid_x, grid_y = self.soft_argmax(refined_corr.view(B, -1, self.feature_size, self.feature_size))
 
         flow = torch.cat((grid_x, grid_y), dim=1)
         flow = unnormalise_and_convert_mapping_to_flow(flow)
-        h, w = flow.shape[-2:]
-        if self.output_interp:
-            flow = F.interpolate(flow, size=output_shape, mode='bilinear', align_corners=False)
-            flow[:, 0] *= float(output_shape[1]) / float(w)
-            flow[:, 1] *= float(output_shape[0]) / float(h)
-
-        if self.occlusion_mask:
-            grid_x_target, grid_y_target = self.soft_argmax(refined_corr_target.transpose(-1,-2).view(B, -1, self.feature_size, self.feature_size),beta=2e-2)
-            flow_target = torch.cat((grid_x_target, grid_y_target), dim=1)
-            flow_target = unnormalise_and_convert_mapping_to_flow(flow_target)
-            if self.output_interp:
-                flow_target = F.interpolate(flow_target, size=output_shape, mode='bilinear', align_corners=False)
-                flow_target[:, 0] *= float(output_shape[1]) / float(w)
-                flow_target[:, 1] *= float(output_shape[0]) / float(h)
-            
-            # grid_x_source, grid_y_source = self.soft_argmax(refined_corr_source.transpose(-1,-2).view(B, -1, self.feature_size, self.feature_size),beta=2e-2)
-            grid_x_source, grid_y_source = self.soft_argmax(refined_corr_source.view(B, -1, self.feature_size, self.feature_size),beta=2e-2)
-            
-            flow_source = torch.cat((grid_x_source, grid_y_source), dim=1)
-            flow_source = unnormalise_and_convert_mapping_to_flow(flow_source)
-            if self.output_interp:
-                flow_source = F.interpolate(flow_source, size=output_shape, mode='bilinear', align_corners=False)
-                flow_source[:, 0] *= float(output_shape[1]) / float(w)
-                flow_source[:, 1] *= float(output_shape[0]) / float(h)
-            
-            return flow, flow_target,flow_source
-
 
         return flow
-    
-    def get_FCN_map(self, img, feat_map, fc, sz):
-        #scales = [1.0,1.5,2.0]
-        scales = [1.0]
-        map_list = []
-        for scale in scales:
-            if scale*scale*sz[0]*sz[1] > 1200*800:
-                scale = 1.5
-            img = F.interpolate(img, (int(scale*sz[0]),int(scale*sz[1])), None, 'bilinear', True) # 1x3xHxW
-            #feat_map, fc = self.extract_intermediate_feat(img,return_hp=False,backbone='fcn101')
-            # feat_map = self.backbone1.evaluate(img)
-            
-            predict = torch.max(feat_map, 1)[1]
-            mask = predict-torch.min(predict)
-            mask_map = mask / torch.max(mask)
-            mask_map = F.interpolate(mask_map.unsqueeze(0).double(), (sz[0],sz[1]), None, 'bilinear', True)[0,0] # HxW
-    
-        return mask_map

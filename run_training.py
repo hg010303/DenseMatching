@@ -63,8 +63,10 @@ def main():
     parser.add_argument('--correlation', action='store_true', help='Correlation')
     parser.add_argument('--reciprocity', action='store_true', help='Reciprocity')
     parser.add_argument('--softmaxattn', action='store_true', help= 'Get attention map after softmax')
-    parser.add_argument('--cost_agg', action='store_true', help='Cost aggregation')
+    parser.add_argument('--cost_agg', type=str, help='Cost aggregation', default='cats', choices=['cats','CRAFT', None])
     parser.add_argument('--cost_transformer', action='store_true', help='Cost transformer')
+    parser.add_argument('--hierarchical', action='store_true', help='Hierarchical')
+    parser.add_argument("--occlusion_mask", action='store_true', help='Occlusion mask')
     
     args = parser.parse_args()
 

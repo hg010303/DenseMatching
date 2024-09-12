@@ -41,7 +41,7 @@ def main(args, settings):
             # define the network to use
             network, estimate_uncertainty = select_model(
                 args.model, pre_trained_model_type, args, args.optim_iter, local_optim_iter,
-                path_to_pre_trained_models=args.path_to_pre_trained_models)
+                path_to_pre_trained_models=args.path_to_pre_trained_models, pretrain_croco_path = args.pretrain_croco_path)
 
             # for networks that inherently predict an uncertainty measure, automatically evaluate it. Can optionally
             # evaluate uncertainty based on cyclic consistency error
@@ -236,7 +236,15 @@ if __name__ == "__main__":
                         help='path to directory to save the text files and results')
     parser.add_argument('--seed', type=int, default=1984, help='Pseudo-RNG seed')
     parser.add_argument("--image_shape", nargs='+', type=int, default=[914, 1380])
+    parser.add_argument("--pretrain_croco_path", default='./CroCo_V2_ViTLarge_BaseDecoder.pth')
     
+    parser.add_argument('--correlation', action='store_true', help='Correlation')
+    parser.add_argument('--reciprocity', action='store_true', help='Reciprocity')
+    parser.add_argument('--softmaxattn', action='store_true', help= 'Get attention map after softmax')
+    parser.add_argument('--cost_agg', type=str, help='Cost aggregation', default='cats', choices=['cats','CRAFT', None])
+    parser.add_argument('--cost_transformer', action='store_true', help='Cost transformer')
+    parser.add_argument("--scot", action='store_true', help='SCOT')
+    parser.add_argument("--occlusion_mask", action='store_true', help='Occlusion mask')
 
     args = parser.parse_args()
     local_optim_iter = int(args.local_optim_iter) if args.local_optim_iter else args.optim_iter

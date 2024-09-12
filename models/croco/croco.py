@@ -17,6 +17,11 @@ from models.croco.blocks import Block, DecoderBlock, PatchEmbed
 from models.croco.pos_embed import get_2d_sincos_pos_embed, RoPE2D 
 from models.croco.masking import RandomMask
 from models.croco.simple_cats import CATs
+from .craft import CRAFT
+from .mod import FeatureL2Norm, unnormalise_and_convert_mapping_to_flow
+from einops import rearrange, repeat
+import numpy as np
+
 
 
 class CroCoNet(nn.Module):
@@ -38,6 +43,7 @@ class CroCoNet(nn.Module):
                  attn_map_output=False,  # whether to output the attention maps
                  output_interp=True,
                  args=None,
+                 cats_depth = 4,
                 ):
                 
         super(CroCoNet, self).__init__()
@@ -46,11 +52,25 @@ class CroCoNet(nn.Module):
         self.attn_map_output = attn_map_output or self.cost_agg
         self.cost_transformer = args.cost_transformer
         self.kwargs = args
-        
+        self.scot = getattr(args,'scot',False)
+        self.hierarchical = getattr(args,'hierarchical',False)
+        self.occlusion_mask = getattr(args,'occlusion_mask',False)
         
         self.reciprocity = getattr(args, 'reciprocity', False)
-        if self.cost_agg:
-            self.cats = CATs(feature_size=14, hyperpixel_ids = [i for i in range(0, 12)], output_interp=output_interp, cost_transformer=self.cost_transformer, args=args)
+        if self.cost_agg=='cats':
+            self.cats = CATs(feature_size=(img_size[0]//16), hyperpixel_ids = [i for i in range(0, 12)], output_interp=output_interp, cost_transformer=self.cost_transformer, args=args,depth=cats_depth)
+        elif self.cost_agg=='CRAFT':
+            self.craft = CRAFT(args=args, dim_tokens_enc=768)#dim_tokens_enc=)
+            self.craft.init()
+            self.x_normal = np.linspace(-1,1,14)
+            self.x_normal = nn.Parameter(torch.tensor(self.x_normal, dtype=torch.float, requires_grad=False))
+            self.y_normal = np.linspace(-1,1,14)
+            self.y_normal = nn.Parameter(torch.tensor(self.y_normal, dtype=torch.float, requires_grad=False))
+            
+            self.x_normal_rev = np.linspace(-1,1,56)
+            self.x_normal_rev = nn.Parameter(torch.tensor(self.x_normal_rev, dtype=torch.float, requires_grad=False))
+            self.y_normal_rev = np.linspace(-1,1,56)
+            self.y_normal_rev = nn.Parameter(torch.tensor(self.y_normal_rev, dtype=torch.float, requires_grad=False))
                 
         # patch embeddings  (with initialization done as in MAE)
         self._set_patch_embed(img_size, patch_size, enc_embed_dim)
@@ -247,6 +267,52 @@ class CroCoNet(nn.Module):
         x = torch.einsum('nhwpqc->nchpwq', x)
         imgs = x.reshape(shape=(x.shape[0], channels, h * patch_size, h * patch_size))
         return imgs
+    
+    def softmax_with_temperature(self, x, beta, d = 1):
+        r'''SFNet: Learning Object-aware Semantic Flow (Lee et al.)'''
+        M, _ = x.max(dim=d, keepdim=True)
+        x = x - M # subtract maximum value for stability
+        exp_x = torch.exp(x/beta)
+        exp_x_sum = exp_x.sum(dim=d, keepdim=True)
+        return exp_x / exp_x_sum
+    
+    def soft_argmax(self, corr, beta=0.02):
+        r'''SFNet: Learning Object-aware Semantic Flow (Lee et al.)'''
+        b,th,tw,h,w = corr.size()
+        corr = corr.view(b,th*tw,h,w)
+        
+        corr = self.softmax_with_temperature(corr, beta=beta, d=1)
+        corr = corr.view(-1,th,tw,h,w) # (target hxw) x (source hxw)
+
+        grid_x = corr.sum(dim=1, keepdim=False) # marginalize to x-coord.
+        x_normal = self.x_normal.expand(b,tw)
+        x_normal = x_normal.view(b,tw,1,1)
+        grid_x = (grid_x*x_normal).sum(dim=1, keepdim=True) # b x 1 x h x w
+        
+        grid_y = corr.sum(dim=2, keepdim=False) # marginalize to y-coord.
+        y_normal = self.y_normal.expand(b,th)
+        y_normal = y_normal.view(b,th,1,1)
+        grid_y = (grid_y*y_normal).sum(dim=1, keepdim=True) # b x 1 x h x w
+        return grid_x, grid_y
+
+    def soft_argmax_rev(self, corr, beta=0.02):
+        r'''SFNet: Learning Object-aware Semantic Flow (Lee et al.)'''
+        b,th,tw,h,w = corr.size()
+        corr = corr.view(b,th*tw,h,w)
+        
+        corr = self.softmax_with_temperature(corr, beta=beta, d=1)
+        corr = corr.view(-1,th,tw,h,w) # (target hxw) x (source hxw)
+
+        grid_x = corr.sum(dim=1, keepdim=False) # marginalize to x-coord.
+        x_normal_rev = self.x_normal_rev.expand(b,tw)
+        x_normal_rev = x_normal_rev.view(b,tw,1,1)
+        grid_x = (grid_x*x_normal_rev).sum(dim=1, keepdim=True) # b x 1 x h x w
+        
+        grid_y = corr.sum(dim=2, keepdim=False) # marginalize to y-coord.
+        y_normal_rev = self.y_normal_rev.expand(b,th)
+        y_normal_rev = y_normal_rev.view(b,th,1,1)
+        grid_y = (grid_y*y_normal_rev).sum(dim=1, keepdim=True) # b x 1 x h x w
+        return grid_x, grid_y
 
     def forward(self, img_target, img_source,mode=None):
         """
@@ -277,13 +343,55 @@ class CroCoNet(nn.Module):
                 attn_map_source[i][:,:,0]=attn_map_source[i].min()    
             
         
-        if self.cost_agg:
+        if self.cost_agg == 'cats':
             decfeat = [feat.detach() for feat in decfeat]
             if self.reciprocity:
                 decfeat_source = [feat.detach() for feat in decfeat_source]
-                out = self.cats(attn_map, decfeat, (H,W), feat_source, feat_target, attn_map_source, decfeat_source)
+                
+                if self.occlusion_mask:
+                    out, out_target, out_source = self.cats(attn_map, decfeat, (H,W), feat_source, feat_target, attn_map_source, decfeat_source, img_target, img_source)
+                    return out,out_target,out_source
+                
+                out = self.cats(attn_map, decfeat, (H,W), feat_source, feat_target, attn_map_source, decfeat_source, img_target, img_source)
+                
             else:
                 out = self.cats(attn_map, decfeat, (H,W), feat_source, feat_target)
             
             return out
+        
+        elif self.cost_agg == 'CRAFT':
+            out = self.craft(decfeat, (H,W), attn_map)
+            # out[-1] = rearrange(out[-1].transpose(-2,-1)+self.craft.tmp, 'b (sh sw) (th tw) -> b sh sw th tw', sh=14, sw=14, th=14, tw=14) 
+            if self.hierarchical:
+                predicted_flow = []
+                
+                for i in range(len(out)):
+                    out[i] = rearrange(out[i], 'b (sh sw) th tw -> b sh sw th tw', sh=14, sw=14) 
+                    
+                    grid_x, grid_y = self.soft_argmax(out[i], beta=0.02)
+                    flow = torch.cat((grid_x, grid_y), dim=1)
+                    flow = unnormalise_and_convert_mapping_to_flow(flow)
+                    predicted_flow.append(flow)
+                    
+                return predicted_flow
+            
+            
+            out[-1] = rearrange(out[-1], 'b (sh sw) th tw -> b sh sw th tw', sh=14, sw=14) 
+            
+            grid_x, grid_y = self.soft_argmax(out[-1], beta=0.02)
+            flow = torch.cat((grid_x, grid_y), dim=1)
+            flow = unnormalise_and_convert_mapping_to_flow(flow)
+            
+
+            if self.reciprocity:
+                out = self.craft(decfeat_source, (H,W), attn_map_source)
+                # out[-1] = rearrange(out[-1].transpose(-2,-1)+self.craft.tmp, 'b (sh sw) (th tw) -> b sh sw th tw', sh=14, sw=14, th=14, tw=14) 
+                out[-1] = rearrange(out[-1], 'b (sh sw) th tw -> b th tw sh sw', sh=14, sw=14) 
+                
+                grid_x, grid_y = self.soft_argmax_rev(out[-1], beta=0.02)
+                flow_reci = torch.cat((grid_x, grid_y), dim=1)
+                flow_reci = unnormalise_and_convert_mapping_to_flow(flow_reci)
+                return flow, flow_reci
+            
+            return flow
         return out, mask_target, None

@@ -12,7 +12,7 @@ from models.semantic_matching_models.cats import CATs
 from models.croco.croco_downstream import croco_args_from_ckpt, CroCoDownstreamBinocular
 from models.croco.head_downstream import PixelwiseTaskWithDPT
 from models.croco.pos_embed import interpolate_pos_embed
-from models.dust3r.model import AsymmetricCroCo3DStereo
+# from models.dust3r.model import AsymmetricCroCo3DStereo
 from models.croco.croco import CroCoNet
 
 def load_network(net, checkpoint_path=None, **kwargs):
@@ -52,7 +52,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def select_model(model_name, pre_trained_model_type, arguments, global_optim_iter, local_optim_iter,
-                 path_to_pre_trained_models='pre_trained_models/'):
+                 path_to_pre_trained_models='pre_trained_models/', pretrain_croco_path = None):
     """
     Select, construct and load model
     args:
@@ -220,18 +220,18 @@ def select_model(model_name, pre_trained_model_type, arguments, global_optim_ite
         network = CATs(forward_pass_strategy='flow_prediction', inference_strategy='softargmax',cost_transformer=False)
 
 
+        
     elif model_name == 'croco':
-        ckpt = torch.load(path_to_pre_trained_models,'cpu')
+        ckpt = torch.load(pretrain_croco_path,'cpu')
         croco_args = croco_args_from_ckpt(ckpt)
         croco_args['img_size'] = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
-        croco_args['cost_agg'] = True
-        croco_args['output_interp'] = True
-        croco_args['cost_transformer']=False
+        croco_args['args'] = arguments
         network = CroCoNet(**croco_args)
+        
         network.load_state_dict(ckpt['model'], strict=False)
 
     elif model_name == 'croco_flow':
-        ckpt = torch.load(path_to_pre_trained_models,'cpu')
+        ckpt = torch.load(pretrain_croco_path,'cpu')
         ckpt_args = ckpt['args']
         ckpt_args.croco_args['img_size'] = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
         ckpt_args.crop = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
@@ -263,11 +263,12 @@ def select_model(model_name, pre_trained_model_type, arguments, global_optim_ite
         if not os.path.exists(checkpoint_fname):
             checkpoint_fname = checkpoint_fname + '.tar'
 
-    if not os.path.exists(checkpoint_fname):
-        raise ValueError('The checkpoint that you chose does not exist, {}'.format(checkpoint_fname))
+    # if not os.path.exists(checkpoint_fname):
+        # raise ValueError('The checkpoint that you chose does not exist, {}'.format(checkpoint_fname))
 
     if 'croco' not in model_name or 'dust3r' not in model_name:
         if 'CATs' != model_name:
+            print("Loading checkpoint from: ", checkpoint_fname)
             network = load_network(network, checkpoint_path=checkpoint_fname)
         network.eval()
         network = network.to(device)

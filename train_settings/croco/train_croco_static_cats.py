@@ -70,9 +70,15 @@ def run(settings, args=None):
 
     model = CroCoNet(**croco_args)
     model.load_state_dict(ckpt['model'], strict=False)
-    for key,value in model.named_parameters():
-        if 'cats' not in key:
-            value.requires_grad = False
+    
+    if args.cost_agg == 'cats':
+        for key,value in model.named_parameters():
+            if 'cats' not in key:
+                value.requires_grad = False
+    elif args.cost_agg == 'CRAFT':
+        for key,value in model.named_parameters():
+            if 'craft' not in key:
+                value.requires_grad = False
             
     # but better results are obtained with using simple bilinear interpolation instead of deconvolutions.
     print(colored('==> ', 'blue') + 'model created.')
@@ -90,7 +96,10 @@ def run(settings, args=None):
     loss_module_256 = MultiScaleFlow(level_weights=weights_level_loss[:2], loss_function=objective,
                                      downsample_gt_flow=True)
     # loss_module = MultiScaleFlow(level_weights=weights_level_loss[2:], loss_function=objective, downsample_gt_flow=True)
-    loss_module = MultiScaleFlow(level_weights=[0.08], loss_function=objective, downsample_gt_flow=True)
+    if args.hierarchical:
+        loss_module = MultiScaleFlow(level_weights=weights_level_loss, loss_function=objective, downsample_gt_flow=True)
+    else:
+        loss_module = MultiScaleFlow(level_weights=[0.08], loss_function=objective, downsample_gt_flow=True)
 
     # 6. Define actor
     CrocoActor = CrocoBasedActor(model, objective=loss_module, objective_256=loss_module_256,

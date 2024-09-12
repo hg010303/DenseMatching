@@ -154,26 +154,14 @@ class CrossAttention(nn.Module):
         Nk = key.shape[1]
         Nv = value.shape[1]
         
-        # self.attn_map = ((query@key.transpose(-2,-1)) * self.scale).softmax(dim=-1)
-
-        # q = self.projq(query).reshape(B,Nq,self.num_heads, C// self.num_heads).permute(0, 2, 1, 3)
-        # k = self.projk(key).reshape(B,Nk,self.num_heads, C// self.num_heads).permute(0, 2, 1, 3)
-        # v = self.projv(value).reshape(B,Nv,self.num_heads, C// self.num_heads).permute(0, 2, 1, 3)
-
-        # self.attn_map = ((query@key.transpose(-2,-1)) * self.scale).softmax(dim=-1)
 
         q = self.projq(query)
         k = self.projk(key)
         v = self.projv(value)
 
-        # self.attn_map = ((q@k.transpose(-2,-1)) * self.scale).softmax(dim=-1)
-
         q = q.reshape(B,Nq,self.num_heads, C// self.num_heads).permute(0, 2, 1, 3)
         k = k.reshape(B,Nk,self.num_heads, C// self.num_heads).permute(0, 2, 1, 3)
         v = v.reshape(B,Nv,self.num_heads, C// self.num_heads).permute(0, 2, 1, 3)
-
-        # self.attn_map = ((q@k.transpose(-2,-1)) * self.scale).softmax(dim=-1)
-        # import ipdb;ipdb.set_trace()
 
 
         if self.rope is not None:
@@ -186,6 +174,7 @@ class CrossAttention(nn.Module):
         attn = attn.softmax(dim=-1)
         if self.softmaxattn:
             attn_tmp = attn.clone().detach()
+            # self.attn_map = attn_tmp
 
         attn = self.attn_drop(attn)
 

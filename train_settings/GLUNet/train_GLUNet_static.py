@@ -35,6 +35,24 @@ def run(settings, args=None):
     co_transform = None
 
     # base training data is DPED-CityScape-ADE
+    # train_dataset, _ = PreMadeDataset(root=settings.env.training_cad_520,
+    #                                   source_image_transform=img_transforms,
+    #                                   target_image_transform=img_transforms,
+    #                                   flow_transform=flow_transform,
+    #                                   co_transform=co_transform,
+    #                                   split=1,
+    #                                   get_mapping=False,
+    #                                   img_size=(224,224))
+
+    # # validation dataset
+    # _, val_dataset = PreMadeDataset(root=settings.env.validation_cad_520,
+    #                                 source_image_transform=img_transforms,
+    #                                 target_image_transform=img_transforms,
+    #                                 flow_transform=flow_transform,
+    #                                 co_transform=co_transform,
+    #                                 split=0,
+    #                                 img_size=(224,224))
+
     train_dataset, _ = PreMadeDataset(root=settings.env.training_cad_520,
                                       source_image_transform=img_transforms,
                                       target_image_transform=img_transforms,

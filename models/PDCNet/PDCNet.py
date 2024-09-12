@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import numpy as np
+
 
 from admin.model_constructor import model_constructor
 from models.modules.mod import deconv, unnormalise_and_convert_mapping_to_flow
@@ -12,7 +14,6 @@ from models.feature_backbones.VGG_features import VGGPyramid
 from models.PDCNet.mod_uncertainty import MixtureDensityEstimatorFromCorr, MixtureDensityEstimatorFromUncertaintiesAndFlow
 from models.base_matching_net import set_glunet_parameters
 from models.PDCNet.base_pdcnet import ProbabilisticGLU
-
 
 class PDCNetModel(ProbabilisticGLU):
     """PDCNet model.
@@ -271,6 +272,11 @@ class PDCNetModel(ProbabilisticGLU):
             raise NotImplementedError('The feature extractor that you selected in not implemented: {}'
                                       .format(pyramid_type))
         self.pyramid = feature_extractor
+        
+        self.x_normal = np.linspace(-1,1,16)
+        self.x_normal = nn.Parameter(torch.tensor(self.x_normal, dtype=torch.float, requires_grad=False))
+        self.y_normal = np.linspace(-1,1,16)
+        self.y_normal = nn.Parameter(torch.tensor(self.y_normal, dtype=torch.float, requires_grad=False))
 
     def get_local_correlation(self, c_target, warp_source):
         if 'GOCor' in self.params.local_corr_type:
@@ -475,6 +481,33 @@ class PDCNetModel(ProbabilisticGLU):
             up_log_var_map = torch.cat((up_small_log_var_map, up_large_log_var_map), 1)
 
         return up_flow, up_log_var_map, up_probability_map, up_feat
+    
+    def soft_argmax(self, corr, beta=0.02):
+        r'''SFNet: Learning Object-aware Semantic Flow (Lee et al.)'''
+        b,_,h,w = corr.size()
+        
+        corr = self.softmax_with_temperature(corr, beta=beta, d=1)
+        corr = corr.view(-1,h,w,h,w) # (target hxw) x (source hxw)
+
+        grid_x = corr.sum(dim=1, keepdim=False) # marginalize to x-coord.
+        x_normal = self.x_normal.expand(b,w)
+        x_normal = x_normal.view(b,w,1,1)
+        grid_x = (grid_x*x_normal).sum(dim=1, keepdim=True) # b x 1 x h x w
+        
+        grid_y = corr.sum(dim=2, keepdim=False) # marginalize to y-coord.
+        y_normal = self.y_normal.expand(b,h)
+        y_normal = y_normal.view(b,h,1,1)
+        grid_y = (grid_y*y_normal).sum(dim=1, keepdim=True) # b x 1 x h x w
+        return grid_x, grid_y
+    
+        
+    def softmax_with_temperature(self, x, beta, d = 1):
+        r'''SFNet: Learning Object-aware Semantic Flow (Lee et al.)'''
+        M, _ = x.max(dim=d, keepdim=True)
+        x = x - M # subtract maximum value for stability
+        exp_x = torch.exp(x/beta)
+        exp_x_sum = exp_x.sum(dim=d, keepdim=True)
+        return exp_x / exp_x_sum
 
     def forward(self, im_target, im_source, im_target_256, im_source_256, im_target_pyr=None,
                 im_source_pyr=None, im_target_pyr_256=None, im_source_pyr_256=None):
@@ -510,11 +543,21 @@ class PDCNetModel(ProbabilisticGLU):
                                                                        im_target_pyr_256=im_target_pyr_256,
                                                                        im_source_pyr_256=im_source_pyr_256)
 
+        
+
         # RESOLUTION 256x256
         # level 4
         flow4, log_var_map4, weight_map4,  corr4 = self.estimate_at_mappinglevel(self.corr_uncertainty_decoder4,
                                                                                  self.uncertainty_decoder4,
                                                                                  c14, c24, h_256, w_256)
+        # grid_x, grid_y = self.soft_argmax(corr4,beta=2e-2)
+        # self.grid_x = grid_x
+        # self.grid_y = grid_y
+
+        # flow = torch.cat((grid_x, grid_y), dim=1)
+        # flow = unnormalise_and_convert_mapping_to_flow(flow)
+        
+        # return flow
 
         up_flow4, up_log_var_map4, up_probability_map4, up_feat4 = self.upscaling(_, flow4, log_var_map4,
                                                                                   weight_map4, (32, 32),

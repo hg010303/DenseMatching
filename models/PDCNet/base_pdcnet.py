@@ -722,6 +722,17 @@ class ProbabilisticGLU(BaseGLUMultiScaleMatchingNet, UncertaintyPredictionInfere
                              Otherwise (single mode), contains 'log_var_map', with shape (B, 1, H, W)
         """
         # define output shape and scaling ratios
+        # output = self.forward(target_img, source_img, target_img_256, source_img_256)
+        # flow_est = output
+        
+        # flow_est = torch.nn.functional.interpolate(input=flow_est, size=output_shape, mode='bilinear',
+        #                                            align_corners=False)
+        # flow_est[:, 0, :, :] *= ratio_x
+        # flow_est[:, 1, :, :] *= ratio_y
+        
+        # return flow_est, None
+        
+        
         output_256, output = self.forward(target_img, source_img, target_img_256, source_img_256)
         flow_est_list = output['flow_estimates']
         flow_est = flow_est_list[-1]
