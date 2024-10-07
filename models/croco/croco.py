@@ -21,6 +21,7 @@ from .craft import CRAFT
 from .mod import FeatureL2Norm, unnormalise_and_convert_mapping_to_flow
 from einops import rearrange, repeat
 import numpy as np
+from .hierarchical_cats import HierarchicalCATs
 
 
 
@@ -71,7 +72,14 @@ class CroCoNet(nn.Module):
             self.x_normal_rev = nn.Parameter(torch.tensor(self.x_normal_rev, dtype=torch.float, requires_grad=False))
             self.y_normal_rev = np.linspace(-1,1,56)
             self.y_normal_rev = nn.Parameter(torch.tensor(self.y_normal_rev, dtype=torch.float, requires_grad=False))
-                
+            
+        elif self.cost_agg=='hierarchical_cats' or self.cost_agg=='hierarchical_residual_cats':
+            # self.cats1 = CATs(feature_size=(img_size[0]//16), hyperpixel_ids = [i for i in range(0, 4)], output_interp=False, cost_transformer=self.cost_transformer, args=args,depth=1)
+            self.cats2 = CATs(feature_size=(img_size[0]//16), hyperpixel_ids = [i for i in range(0, 4)], output_interp=False, cost_transformer=self.cost_transformer, args=args,depth=1)
+            self.cats3 = CATs(feature_size=(img_size[0]//16), hyperpixel_ids = [i for i in range(0, 4)], output_interp=False, cost_transformer=self.cost_transformer, args=args,depth=1)
+            self.cats4 = CATs(feature_size=(img_size[0]//16), hyperpixel_ids = [i for i in range(0, 4)], output_interp=False, cost_transformer=self.cost_transformer, args=args,depth=1)
+            
+            self.hierarchical_cats = HierarchicalCATs(dim_tokens_enc = 1024+2, hooks = [0,1,2,], args=args)
         # patch embeddings  (with initialization done as in MAE)
         self._set_patch_embed(img_size, patch_size, enc_embed_dim)
 
@@ -323,8 +331,11 @@ class CroCoNet(nn.Module):
         masks are also returned as B x N just in case 
         """
         B,_,H,W = img_target.size()
-        feat_target, pos_target, mask_target = self._encode_image(img_target, do_mask=False)
-        feat_source, pos_source, mask_source = self._encode_image(img_source, do_mask=False)
+        feat_targets, pos_target, mask_target = self._encode_image(img_target, do_mask=False, return_all_blocks=True)
+        feat_sources, pos_source, mask_source = self._encode_image(img_source, do_mask=False, return_all_blocks=True)
+
+        feat_target = feat_targets[-1]
+        feat_source = feat_sources[-1]
 
         # decoder
         decfeat, attn_map = self._decoder(feat_target, pos_target, mask_target, feat_source, pos_source, return_all_blocks=True)
@@ -358,6 +369,22 @@ class CroCoNet(nn.Module):
                 out = self.cats(attn_map, decfeat, (H,W), feat_source, feat_target)
             
             return out
+        
+        elif self.cost_agg == 'hierarchical_cats' or self.cost_agg == 'hierarchical_residual_cats':
+            assert self.reciprocity, "reciprocity must be True for hierarchical_cats"
+            encfeat_targets = [feat.detach() for feat in feat_targets]
+            encfeat_sources = [feat.detach() for feat in feat_sources]
+            
+            aggregates_flow1 = self.cats4(attn_map[0:4], encfeat_targets[0:4], (H,W), feat_source, feat_target, attn_map_source[0:4], encfeat_sources[0:4])
+            aggregates_flow2 = self.cats3(attn_map[4:8], encfeat_targets[4:8], (H,W), feat_source, feat_target, attn_map_source[4:8], encfeat_sources[4:8])
+            aggregates_flow3 = self.cats2(attn_map[8:12], encfeat_targets[8:12], (H,W), feat_source, feat_target, attn_map_source[8:12], encfeat_sources[8:12])            
+            
+            aggregates_flows = [aggregates_flow1, aggregates_flow2, aggregates_flow3]
+            enc_feats = [encfeat_targets[3], encfeat_targets[7], encfeat_targets[11]]
+            
+            outputs = self.hierarchical_cats(enc_feats,aggregates_flows, (H,W))
+            outputs = outputs + [aggregates_flow1, aggregates_flow2, aggregates_flow3]
+            return outputs
         
         elif self.cost_agg == 'CRAFT':
             out = self.craft(decfeat, (H,W), attn_map)
@@ -394,4 +421,5 @@ class CroCoNet(nn.Module):
                 return flow, flow_reci
             
             return flow
+        
         return out, mask_target, None

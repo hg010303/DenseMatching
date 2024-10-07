@@ -16,6 +16,9 @@ from models.croco.mod import FeatureL2Norm, unnormalise_and_convert_mapping_to_f
 from models.croco.SCOT.rhm_map import rhm
 from models.croco.SCOT.geometry import gaussian2d, center, receptive_fields
 
+## uncertainty
+from models.PDCNet.mod_uncertainty import MixtureDensityEstimatorFromCorr, MixtureDensityEstimatorFromUncertaintiesAndFlow
+
 
 r'''
 Modified timm library Vision Transformer implementation
@@ -235,11 +238,32 @@ class CATs(nn.Module):
         self.reciprocity = getattr(args,'reciprocity',False)
         self.scot = getattr(args,'scot',False)
         self.occlusion_mask = getattr(args,'occlusion_mask',False)
+        self.uncertainty = getattr(args,'uncertainty',False)
+        self.give_layer_before_flow_to_uncertainty_decoder = True
 
-        channels = [768]*12
+        if self.args.cost_agg == 'hierarchical_cats' or self.args.cost_agg == 'hierarchical_residual_cats':
+            channels = [1024]*12
+        else:
+            channels = [768]*12
         if self.correlation:
             channels = [1024]+channels
             hyperpixel_ids = hyperpixel_ids + [12]
+            
+        if self.uncertainty:
+            self.corr_uncertainty_decoder4 = MixtureDensityEstimatorFromCorr(in_channels=1,
+                                                                         batch_norm=True,
+                                                                         search_size=14, output_channels=6,
+                                                                         output_all_channels_together=True)
+
+            if self.give_layer_before_flow_to_uncertainty_decoder:
+                uncertainty_input_channels = 6 + 196
+            else:
+                uncertainty_input_channels = 6 + 2
+            self.uncertainty_decoder4 = MixtureDensityEstimatorFromUncertaintiesAndFlow(in_channels=uncertainty_input_channels,
+                                                                                        batch_norm=True,
+                                                                                        output_channels=3)
+
+
 
         # self.feature_extraction = FeatureExtractionHyperPixel(hyperpixel_ids, feature_size, freeze)
         self.ln = nn.ModuleList([nn.LayerNorm(channels[i]) for i in hyperpixel_ids])
@@ -275,7 +299,6 @@ class CATs(nn.Module):
     def soft_argmax(self, corr, beta=0.02):
         r'''SFNet: Learning Object-aware Semantic Flow (Lee et al.)'''
         b,_,h,w = corr.size()
-        
         corr = self.softmax_with_temperature(corr, beta=beta, d=1)
         corr = corr.view(-1,h,w,h,w) # (target hxw) x (source hxw)
 
@@ -304,6 +327,63 @@ class CATs(nn.Module):
     
     def corr(self, src, trg):
         return src.flatten(2).transpose(-1, -2) @ trg.flatten(2)
+    
+    def estimate_uncertainty_components(self, corr_uncertainty_module, uncertainty_predictor,
+                                        corr_type, corr, c_target, c_source, flow, up_previous_flow=None,
+                                        up_previous_uncertainty=None, global_local='global_corr'):
+        # corr uncertainty decoder
+        x_second_corr = None
+        if 'gocor' in corr_type.lower():
+            if self.corr_for_corr_uncertainty_decoder == 'gocor':
+                input_corr_uncertainty_dec = corr
+            elif self.corr_for_corr_uncertainty_decoder == 'corr':
+                input_corr_uncertainty_dec = getattr(self, global_local)(c_target, c_source)
+
+            elif self.corr_for_corr_uncertainty_decoder == 'corr_and_gocor':
+                input_corr_uncertainty_dec = getattr(self, global_local)(c_target, c_source)
+                x_second_corr = corr
+            else:
+                raise NotImplementedError
+        else:
+            input_corr_uncertainty_dec = corr
+
+        input_corr_uncertainty_dec = input_corr_uncertainty_dec.transpose(-1, -2).reshape(input_corr_uncertainty_dec.size(0), -1, self.feature_size, self.feature_size)
+        corr_uncertainty = corr_uncertainty_module(input_corr_uncertainty_dec, x_second_corr=x_second_corr)
+
+        flow = flow.transpose(-1, -2).reshape(flow.size(0), -1, self.feature_size, self.feature_size)
+        # final uncertainty decoder
+        if up_previous_flow is not None and up_previous_uncertainty is not None:
+            input_uncertainty = torch.cat((corr_uncertainty, flow,
+                                           up_previous_uncertainty, up_previous_flow), 1)
+        else:
+            input_uncertainty = torch.cat((corr_uncertainty, flow), 1)
+
+        large_log_var_map, weight_map = uncertainty_predictor(input_uncertainty)
+        return large_log_var_map, weight_map
+    
+    @staticmethod
+    def constrain_large_log_var_map(var_min, var_max, large_log_var_map):
+        """
+        Constrains variance parameter between var_min and var_max, returns log of the variance. Here large_log_var_map
+        is the unconstrained variance, outputted by the network
+        Args:
+            var_min: min variance, corresponds to parameter beta_minus in paper
+            var_max: max variance, corresponds to parameter beta_plus in paper
+            large_log_var_map: value to constrain
+
+        Returns:
+            larger_log_var_map: log of variance parameter
+        """
+        if var_min > 0 and var_max > 0:
+            large_log_var_map = torch.log(var_min +
+                                          (var_max - var_min) * torch.sigmoid(large_log_var_map - torch.log(var_max)))
+        elif var_max > 0:
+            large_log_var_map = torch.log((var_max - var_min) * torch.sigmoid(large_log_var_map - torch.log(var_max)))
+        elif var_min > 0:
+            # large_log_var_map = torch.log(var_min + torch.exp(large_log_var_map))
+            max_exp = large_log_var_map.detach().max() - 10.0
+            large_log_var_map = torch.log(var_min / max_exp.exp() + torch.exp(large_log_var_map - max_exp)) + max_exp
+        return large_log_var_map
 
     def forward(self, attn_maps, tgt_feats,output_shape, feat_source, feat_target, attn_maps_source=None, src_feats=None, tgt_img = None, src_img = None):
         B, _,_ = tgt_feats[0].size()
@@ -336,12 +416,28 @@ class CATs(nn.Module):
         # attn_maps = self.mutual_nn_filter(attn_maps)
         refined_corr = self.decoder(attn_maps, tgt_feats)
         
-        if self.reciprocity:
+        if self.args.reverse:
+            src_feats = torch.stack(src_feats_proj, dim=1)
+            attn_maps_source = torch.stack(attn_maps_source, dim=1)
+            refined_corr_source = self.decoder(attn_maps_source, src_feats)
+            refined_corr_target = refined_corr
+            refined_corr = (refined_corr_source.transpose(-1,-2))
+        elif self.reciprocity:
             src_feats = torch.stack(src_feats_proj, dim=1)
             attn_maps_source = torch.stack(attn_maps_source, dim=1)
             refined_corr_source = self.decoder(attn_maps_source, src_feats)
             refined_corr_target = refined_corr
             refined_corr = (refined_corr + refined_corr_source.transpose(-1,-2)) / 2
+            
+        if self.uncertainty:
+            large_log_var_map4, weight_map4 = self.estimate_uncertainty_components(self.corr_uncertainty_decoder4,
+                                                                        self.uncertainty_decoder4,
+                                                                        'corr',
+                                                                        attn_maps[:,0], None, None, refined_corr,
+                                                                        global_local='use_global_corr_layer')
+            large_log_var_map4 = self.constrain_large_log_var_map(torch.tensor(2.0), torch.tensor(0.0), large_log_var_map4)
+            small_log_var_map4 = torch.ones_like(large_log_var_map4, requires_grad=False) * torch.log(torch.tensor(1.0))
+            log_var_map4 = torch.cat((small_log_var_map4, large_log_var_map4), 1)
         
         if not self.cost_transformer:
             refined_corr = attn_maps.mean(dim=1) ## target source
@@ -420,7 +516,11 @@ class CATs(nn.Module):
             
             return flow, flow_target,flow_source
 
-
+        if self.uncertainty:
+            
+            output = {'flow_estimates': [flow],
+                    'uncertainty_estimates': [[log_var_map4, weight_map4]]}
+            return output
         return flow
     
     def get_FCN_map(self, img, feat_map, fc, sz):

@@ -415,7 +415,7 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
         flow_gt = mini_batch['flow_map'].to(device)
         mask_valid = mini_batch['correspondence_mask'].to(device)
 
-        if estimate_uncertainty:
+        if estimate_uncertainty and not 'croco' in args.model:
             # flow_est, uncertainty_est = network.estimate_flow_and_confidence_map( source_img,target_img)
             
             H,W = args.image_shape
@@ -459,12 +459,18 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
 
             flow_est = network(target_img, source_img)
             
-            # import ipdb;ipdb.set_trace()
-            occlusion_mask = forward_backward_consistency_check(flow_est[1], flow_est[2])[0]
-            flow_fw = flow_est[1]
-            flow_bw = flow_est[2]
+            if estimate_uncertainty:
+                uncertainty = flow_est['uncertainty_estimates']
+                flow_est = flow_est['flow_estimates'][0]
+                uncertainty_est = {"log_var_map": uncertainty[0][0], "weight_map": uncertainty[0][1],}
+                
             
-            flow_est = flow_est[0]
+            # import ipdb;ipdb.set_trace()
+            # occlusion_mask = forward_backward_consistency_check(flow_est[1], flow_est[2])[0]
+            # flow_fw = flow_est[1]
+            # flow_bw = flow_est[2]
+            
+            # flow_est = flow_est[0]
             
             # flow_est = F.interpolate(flow_est, size=(flow_gt_h, flow_gt_w), mode='bilinear', align_corners=False).to(device)
             
@@ -506,42 +512,41 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
         pck_3_list.append(epe.le(3.0).float().mean().item())
         pck_5_list.append(epe.le(5.0).float().mean().item())
 
-        if vis_attn:
-            in1k_mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1).to(source_img.device)
-            in1k_std =  torch.tensor([0.229, 0.224, 0.225]).view(3,1,1).to(source_img.device)
+        # if vis_attn:
+        #     in1k_mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1).to(source_img.device)
+        #     in1k_std =  torch.tensor([0.229, 0.224, 0.225]).view(3,1,1).to(source_img.device)
             
-            output_dir = f'./output_crocov2/masking/{hp}'
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
+        #     output_dir = f'./output_crocov2/masking/{hp}'
+        #     if not os.path.exists(output_dir):
+        #         os.makedirs(output_dir)
             
-            if 'croco' in args.model:
-                source_img, target_img = source_img.squeeze()*in1k_std + in1k_mean, target_img.squeeze() * in1k_std + in1k_mean
-                grid_x, grid_y = ((network.cats.grid_x+1)*(14-1)/2.).squeeze(), ((network.cats.grid_y+1)*(14-1)/2.).squeeze()
-            else:
-                source_img, target_img = source_img.squeeze()/255., target_img.squeeze()/255.
-                # grid_x, grid_y = ((network.grid_x+1)*(14-1)/2.).squeeze(), ((network.grid_y+1)*(14-1)/2.).squeeze()
+        #     if 'croco' in args.model:
+        #         source_img, target_img = source_img.squeeze()*in1k_std + in1k_mean, target_img.squeeze() * in1k_std + in1k_mean
+        #         grid_x, grid_y = ((network.cats.grid_x+1)*(14-1)/2.).squeeze(), ((network.cats.grid_y+1)*(14-1)/2.).squeeze()
+        #     else:
+        #         source_img, target_img = source_img.squeeze()/255., target_img.squeeze()/255.
+        #         # grid_x, grid_y = ((network.grid_x+1)*(14-1)/2.).squeeze(), ((network.grid_y+1)*(14-1)/2.).squeeze()
                 
  
-            fname = os.path.join(output_dir, 'img_'+str(i_batch))
+        #     fname = os.path.join(output_dir, 'img_'+str(i_batch))
             
-            height,width = torch.randint(0, H_32//16, (1,)).item(), torch.randint(0, W_32//16, (1,)).item()
+        #     height,width = torch.randint(0, H_32//16, (1,)).item(), torch.randint(0, W_32//16, (1,)).item()
 
-            ## vis target
-            target_img[...,height*16:(height+1)*16,width*16:(width+1)*16] = 1
-            target_input = target_img.clone().permute(1,2,0).cpu().numpy()
-            target_input = Image.fromarray((target_input*255).astype(np.uint8))
-            target_input.save(fname+'_target.png')
+        #     ## vis target
+        #     target_img[...,height*16:(height+1)*16,width*16:(width+1)*16] = 1
+        #     target_input = target_img.clone().permute(1,2,0).cpu().numpy()
+        #     target_input = Image.fromarray((target_input*255).astype(np.uint8))
+        #     target_input.save(fname+'_target.png')
 
-            ## vis source
-            source_input = source_img.clone().permute(1,2,0).cpu().numpy()
-            source_input = Image.fromarray((source_input*255).astype(np.uint8))
-            source_input.save(fname+'_source.png')
-            resize = torchvision.transforms.Resize((H_32, W_32))
+        #     ## vis source
+        #     source_input = source_img.clone().permute(1,2,0).cpu().numpy()
+        #     source_input = Image.fromarray((source_input*255).astype(np.uint8))
+        #     source_input.save(fname+'_source.png')
+        #     resize = torchvision.transforms.Resize((H_32, W_32))
             
             # flow_est = F.interpolate(flow_est, size=(flow_gt_h, flow_gt_w), mode='bilinear', align_corners=False).to(device)
-            torchvision.utils.save_image(mask_valid.float().repeat(3,1,1)*255, fname+'_gt_mask.png')
+            # torchvision.utils.save_image(mask_valid.float().repeat(3,1,1)*255, fname+'_gt_mask.png')
             
-            mask_valid = mask_valid.repeat(2,1,1).float().unsqueeze(0)
             
             
             # mask_valid = mask_valid.cpu().permute(1,2,0).repeat(1,1,3).numpy()
@@ -701,9 +706,9 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
                 # plt.savefig(fname+'_attn_map_all_after'+str(j)+'.png')
                 
 
-        # if estimate_uncertainty:
-        #     dict_list_uncertainties = compute_uncertainty_per_image(uncertainty_est, flow_gt, flow_est, mask_valid,
-        #                                                             dict_list_uncertainties)
+        if estimate_uncertainty:
+            dict_list_uncertainties = compute_uncertainty_per_image(uncertainty_est, flow_gt, flow_est, mask_valid,
+                                                                    dict_list_uncertainties)
 
     epe_all = np.concatenate(epe_all_list)
     pck1_dataset = np.mean(epe_all <= 1)

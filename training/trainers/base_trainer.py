@@ -123,7 +123,9 @@ class BaseTrainer:
 
         ckpts = sorted(glob.glob('{}/{}/{}_ep*.pth.tar'.format(self._base_save_dir, self.settings.project_path,
                                                                net_type)))
-        ckpts_to_remove = sorted(ckpts)[:-self.settings.keep_last_checkpoints]
+        # ckpts_to_remove = sorted(ckpts)[:-self.settings.keep_last_checkpoints]
+        ckpts_to_remove = sorted(ckpts)[:-2]
+        
         if len(ckpts_to_remove) > 0:
             for ckpt in ckpts_to_remove:
                 os.remove(ckpt)

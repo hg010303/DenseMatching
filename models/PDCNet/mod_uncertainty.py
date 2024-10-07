@@ -92,6 +92,16 @@ class MixtureDensityEstimatorFromCorr(nn.Module):
                 self.predict_uncertainty = nn.Conv2d(16, output_channels+1, kernel_size=3, stride=1, padding=0, bias=True)
             else:
                 self.predict_uncertainty = nn.Conv2d(16, output_channels, kernel_size=3, stride=1, padding=0, bias=True)
+                
+        elif search_size == 14:
+            self.conv_0 = conv(in_channels, 32, kernel_size=3, stride=1, padding=1, batch_norm=batch_norm)
+            self.maxpool = nn.MaxPool2d((2, 2))
+            self.conv_1 = conv(32, 32, kernel_size=3, stride=1, padding=0, batch_norm=batch_norm)
+            self.conv_2 = conv(32, 16, kernel_size=3, stride=1, padding=0, batch_norm=batch_norm)
+            if self.estimate_small_variance:
+                self.predict_uncertainty = nn.Conv2d(16, output_channels+1, kernel_size=3, stride=1, padding=0, bias=True)
+            else:
+                self.predict_uncertainty = nn.Conv2d(16, output_channels, kernel_size=3, stride=1, padding=0, bias=True)
 
         if self.concatenate_with_flow:
             self.conv_3 = conv(4 + nbr_channels_concatenated_flow, 32, kernel_size=3, stride=1, padding=1, batch_norm=batch_norm)
@@ -123,6 +133,11 @@ class MixtureDensityEstimatorFromCorr(nn.Module):
             x = self.conv_2(self.conv_1(self.conv_0(x)))
             uncertainty_corr = self.predict_uncertainty(x)
         elif self.search_size == 16:
+            x = self.conv_0(x)
+            x = self.maxpool(x)
+            x = self.conv_2(self.conv_1(x))
+            uncertainty_corr = self.predict_uncertainty(x)
+        elif self.search_size == 14:
             x = self.conv_0(x)
             x = self.maxpool(x)
             x = self.conv_2(self.conv_1(x))

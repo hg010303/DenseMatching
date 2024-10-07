@@ -5,13 +5,13 @@ CUDA_VISIBLE_DEVICES=3 python -u vis_attn.py \
  --pretrain_croco_path ./CroCo_V2_ViTLarge_BaseDecoder.pth \
  --save_dir /media/data1/hg_log/densematching \
  --image_shape 224 224 \
- --path_to_pre_trained_models /media/data1/hg_log/densematching/train_settings/croco/train_croco_static_cats__reciprocity_lr1e4_aftersoftmax_correlation/CroCoNet_model_best.pth.tar \
+ --path_to_pre_trained_models /media/data1/hg_log/densematching/train_settings/croco/train_croco_static_cats__uncertainty/CroCoNet_model_best.pth.tar \
  --softmaxattn \
  --reciprocity \
  --correlation \
  --cost_agg cats \
  --cost_transformer \
- --occlusion_mask 
+ --uncertainty
  
 
 #  CUDA_VISIBLE_DEVICES=3 python -u vis_attn.py \
@@ -22,7 +22,7 @@ CUDA_VISIBLE_DEVICES=3 python -u vis_attn.py \
 #  --save_dir /media/data1/hg_log/densematching \
 #  --image_shape 224 224 \
 #  --softmaxattn \
-#  --cost_agg cats
+#  --cost_agg cats \
 #  --cost_transformer
 
 #  --path_to_pre_trained_models /media/data1/hg_log/densematching/train_settings/croco/train_croco_static_cats__reciprocity_lr1e4_aftersoftmax_correlation/CroCoNet_model_best.pth.tar \

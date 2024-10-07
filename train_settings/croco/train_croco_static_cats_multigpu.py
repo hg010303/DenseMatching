@@ -20,8 +20,6 @@ from models.croco.croco_downstream import croco_args_from_ckpt, CroCoDownstreamB
 from models.croco.croco import CroCoNet
 from models.croco.head_downstream import PixelwiseTaskWithDPT
 from models.croco.pos_embed import interpolate_pos_embed
-from training.losses.neg_log_likelihood import NLLMixtureLaplace
-from training.losses.multiscale_loss import MultiScaleMixtureDensity
 
 
 def run(settings, args=None):
@@ -29,7 +27,7 @@ def run(settings, args=None):
     settings.data_mode = 'local'
     settings.batch_size = 16 #24
     settings.n_threads = 8
-    settings.multi_gpu = False
+    settings.multi_gpu = True
     settings.print_interval = 100
     settings.lr = 0.0001 if args.lr == None else args.lr
     settings.scheduler_steps = [100, 120, 130]
@@ -93,25 +91,20 @@ def run(settings, args=None):
     batch_processing = GLUNetBatchPreprocessing(settings, apply_mask=False, apply_mask_zero_borders=False,
                                                 sparse_ground_truth=False)
     # 5, Define loss module
-    weights_level_loss = [0.32, 0.08, 0.02, 0.01]
+    objective = EPE()
     
+    weights_level_loss = [0.32, 0.08, 0.02, 0.01]
+    loss_module_256 = MultiScaleFlow(level_weights=weights_level_loss[:2], loss_function=objective,
+                                downsample_gt_flow=True)
     if args.uncertainty:
-        objective = EPE()
         weights_level_loss = [0.32, 0.08, 0.02, 0.01]
         loss_module_256 = MultiScaleFlow(level_weights=weights_level_loss[:2], loss_function=objective,
                                         downsample_gt_flow=True)
         # loss_module = MultiScaleFlow(level_weights=weights_level_loss[2:], loss_function=objective, downsample_gt_flow=True)
     elif args.hierarchical:
-        if args.cost_agg == 'hierarchical_cats':
-            weights_level_loss = [0.32, 0.32, 0.32, 0.32,0.32,0.32]
+        if args.cost_agg == 'hierarchical_cats' or args.cost_agg == 'hierarchical_residual_cats':
+            weights_level_loss = [0.32, 0.08, 0.02, 0.01,0.01,0.01]
         loss_module = MultiScaleFlow(level_weights=weights_level_loss, loss_function=objective, downsample_gt_flow=True)
-    else:
-        objective = NLLMixtureLaplace()
-        weights_level_loss = [0.32, 0.08, 0.02, 0.01]
-        # loss_module_256 = MultiScaleMixtureDensity(level_weights=weights_level_loss[:2], loss_function=objective,
-                                                # downsample_gt_flow=True)
-        loss_module = MultiScaleMixtureDensity(level_weights=weights_level_loss[0.32], loss_function=objective,
-                                            downsample_gt_flow=True)
 
     # 6. Define actor
     CrocoActor = CrocoBasedActor(model, objective=loss_module, objective_256=loss_module_256,

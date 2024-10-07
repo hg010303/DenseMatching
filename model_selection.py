@@ -227,7 +227,7 @@ def select_model(model_name, pre_trained_model_type, arguments, global_optim_ite
         croco_args['img_size'] = ((arguments.image_shape[0]//32)*32,(arguments.image_shape[1]//32)*32)
         croco_args['args'] = arguments
         network = CroCoNet(**croco_args)
-        
+        estimate_uncertainty = arguments.uncertainty
         network.load_state_dict(ckpt['model'], strict=False)
 
     elif model_name == 'croco_flow':

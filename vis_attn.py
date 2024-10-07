@@ -245,6 +245,8 @@ if __name__ == "__main__":
     parser.add_argument('--cost_transformer', action='store_true', help='Cost transformer')
     parser.add_argument("--scot", action='store_true', help='SCOT')
     parser.add_argument("--occlusion_mask", action='store_true', help='Occlusion mask')
+    parser.add_argument('--reverse', action='store_true', help='Reverse')
+    parser.add_argument('--uncertainty',action='store_true', help='Uncertainty')
 
     args = parser.parse_args()
     local_optim_iter = int(args.local_optim_iter) if args.local_optim_iter else args.optim_iter
