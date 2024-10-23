@@ -241,7 +241,7 @@ if __name__ == "__main__":
     parser.add_argument('--correlation', action='store_true', help='Correlation')
     parser.add_argument('--reciprocity', action='store_true', help='Reciprocity')
     parser.add_argument('--softmaxattn', action='store_true', help= 'Get attention map after softmax')
-    parser.add_argument('--cost_agg', type=str, help='Cost aggregation', default='cats', choices=['cats','CRAFT', None])
+    parser.add_argument('--cost_agg', type=str, help='Cost aggregation', default='cats', choices=['cats','CRAFT','hierarchical_cats', 'hierarchical_residual_cats','hierarchical_conv4d_cats','croco_flow', 'hierarchical_conv4d_cats_level',None])
     parser.add_argument('--cost_transformer', action='store_true', help='Cost transformer')
     parser.add_argument("--scot", action='store_true', help='SCOT')
     parser.add_argument("--occlusion_mask", action='store_true', help='Occlusion mask')

@@ -18,6 +18,7 @@ from models.croco.SCOT.geometry import gaussian2d, center, receptive_fields
 
 ## uncertainty
 from models.PDCNet.mod_uncertainty import MixtureDensityEstimatorFromCorr, MixtureDensityEstimatorFromUncertaintiesAndFlow
+from models.croco.conv4d_coponerf import Conv4d
 
 
 r'''
@@ -227,7 +228,8 @@ class CATs(nn.Module):
     hyperpixel_ids=[0,8,20,21,26,28,29,30],
     output_interp=False,
     cost_transformer=True,
-    args=None):
+    args=None,
+    conv4d=False,):
         super().__init__()
         self.feature_size = feature_size
         self.feature_proj_dim = feature_proj_dim
@@ -236,12 +238,12 @@ class CATs(nn.Module):
         self.args=args
         self.correlation = getattr(args,'correlation',False)
         self.reciprocity = getattr(args,'reciprocity',False)
-        self.scot = getattr(args,'scot',False)
         self.occlusion_mask = getattr(args,'occlusion_mask',False)
         self.uncertainty = getattr(args,'uncertainty',False)
         self.give_layer_before_flow_to_uncertainty_decoder = True
+        self.conv4d = conv4d
 
-        if self.args.cost_agg == 'hierarchical_cats' or self.args.cost_agg == 'hierarchical_residual_cats':
+        if self.args.cost_agg == 'hierarchical_cats' or self.args.cost_agg == 'hierarchical_residual_cats' or self.args.cost_agg == 'hierarchical_conv4d_cats' or self.args.cost_agg == 'hierarchical_conv4d_cats_level' or self.args.cost_agg == 'hierarchical_conv4d_cats_level_4stage':
             channels = [1024]*12
         else:
             channels = [768]*12
@@ -262,6 +264,19 @@ class CATs(nn.Module):
             self.uncertainty_decoder4 = MixtureDensityEstimatorFromUncertaintiesAndFlow(in_channels=uncertainty_input_channels,
                                                                                         batch_norm=True,
                                                                                         output_channels=3)
+            
+        if self.conv4d:
+            self.conv4d_seq = nn.Sequential(
+                Conv4d(in_channels=1, out_channels=16, kernel_size=[3,3,3,3], stride=[1,1,2,2], padding=[1,1,1,1]),
+                nn.GroupNorm(4,16),
+                nn.ReLU(),
+                Conv4d(in_channels=16, out_channels=64, kernel_size=[3,3,3,3], stride=[1,1,2,2], padding=[1,1,1,1]),
+                nn.GroupNorm(4,64),
+                nn.ReLU(),
+                Conv4d(in_channels=64, out_channels=128, kernel_size=[3,3,3,3], stride=[1,1,2,2], padding=[1,1,1,1]),
+                nn.GroupNorm(4,128),
+                nn.ReLU(),
+                )
 
 
 
@@ -430,57 +445,25 @@ class CATs(nn.Module):
             refined_corr = (refined_corr + refined_corr_source.transpose(-1,-2)) / 2
             
         if self.uncertainty:
-            large_log_var_map4, weight_map4 = self.estimate_uncertainty_components(self.corr_uncertainty_decoder4,
+            uncertainty4 = self.estimate_uncertainty_components(self.corr_uncertainty_decoder4,
                                                                         self.uncertainty_decoder4,
                                                                         'corr',
                                                                         attn_maps[:,0], None, None, refined_corr,
                                                                         global_local='use_global_corr_layer')
-            large_log_var_map4 = self.constrain_large_log_var_map(torch.tensor(2.0), torch.tensor(0.0), large_log_var_map4)
-            small_log_var_map4 = torch.ones_like(large_log_var_map4, requires_grad=False) * torch.log(torch.tensor(1.0))
-            log_var_map4 = torch.cat((small_log_var_map4, large_log_var_map4), 1)
+            # large_log_var_map4 = self.constrain_large_log_var_map(torch.tensor(2.0), torch.tensor(0.0), large_log_var_map4)
+            # small_log_var_map4 = torch.ones_like(large_log_var_map4, requires_grad=False) * torch.log(torch.tensor(1.0))
+            # log_var_map4 = torch.cat((small_log_var_map4, large_log_var_map4), 1)
+            
+            # log_var_map4 = F.interpolate(log_var_map4, size=output_shape, mode='bilinear', align_corners=False)
+            uncertainty4 = F.interpolate(uncertainty4, size=output_shape, mode='bilinear', align_corners=False)
+            
         
         if not self.cost_transformer:
             refined_corr = attn_maps.mean(dim=1) ## target source
             # refined_corr = (attn_maps.mean(dim=1) + attn_maps_source.mean(dim=1).transpose(-1,-2))/2.
             # refined_corr = self.corr(self.l2norm(feat_target.permute(0,2,1)),self.l2norm(feat_source.permute(0,2,1)))
             
-        if self.scot:
-            tgt = tgt_feats[:,-1].permute(0,2,1).reshape(B,-1,self.feature_size,self.feature_size).squeeze()
-            hpgeometry = receptive_fields(8, 1, tgt.size()).to(tgt_feats.device)
-            
-            # get CAM mask
-            mask = tgt.mean(dim=0)
-            scale = 1.0
-            
-            hpos = center(hpgeometry)
-            hselect = mask[hpos[:,1].long(),hpos[:,0].long()].to(hpos.device)
-            weights = 0.5*torch.ones(196,1).to(hpos.device)
-            # weights = 0.5*torch.ones((1,1)).to(hpos.device)
-            
-            weights[hselect>0.4*scale,:] = 0.8
-            weights[hselect>0.5*scale,:] = 0.9
-            weights[hselect>0.6*scale,:] = 1.0
-            
-            target_weights = weights
 
-            mask = src_feats[:,-1].permute(0,2,1).reshape(B,-1,self.feature_size,self.feature_size).squeeze().mean(dim=0)
-
-            hpos = center(hpgeometry)
-            hselect = mask[hpos[:,1].long(),hpos[:,0].long()].to(hpos.device)
-            weights = 0.5*torch.ones(196,1).to(hpos.device)
-            # weights = 0.5*torch.ones(1,1).to(hpos.device)
-            
-
-            weights[hselect>0.4*scale,:] = 0.8
-            weights[hselect>0.5*scale,:] = 0.9
-            weights[hselect>0.6*scale,:] = 1.0
-            
-            source_weights = weights
-            
-            src_hyperpixels = (hpgeometry, src_feats[:,-1].permute(0,2,1).squeeze().permute(1,0), src_img.size()[1:][::-1], source_weights)
-            tgt_hyperpixels = (hpgeometry, tgt_feats[:,-1].permute(0,2,1).squeeze().permute(1,0), tgt_img.size()[1:][::-1], target_weights)
-            
-            refined_corr = rhm(src_hyperpixels, tgt_hyperpixels, attn_maps, gaussian2d(7).to(tgt_feats[-1].device),  'OTGeo', 1.0,1.0,0.05 )
 
 
         grid_x, grid_y = self.soft_argmax(refined_corr.transpose(-1,-2).view(B, -1, self.feature_size, self.feature_size),beta=2e-2)
@@ -515,11 +498,20 @@ class CATs(nn.Module):
                 flow_source[:, 1] *= float(output_shape[0]) / float(h)
             
             return flow, flow_target,flow_source
+        
+        if self.conv4d:
+            PH, PW = output_shape[0]//16, output_shape[1]//16
+            refined_corr = refined_corr.view(B,PH, PW, PH, PW).unsqueeze(dim=1)
+            refined_corr = self.conv4d_seq(refined_corr)
+            bsz, ch, ha, wa, hb, wb = refined_corr.size()
+            refined_corr = refined_corr.view(bsz, ch, ha, wa, -1).mean(dim=-1)
+            
+            return flow, refined_corr
 
         if self.uncertainty:
             
-            output = {'flow_estimates': [flow],
-                    'uncertainty_estimates': [[log_var_map4, weight_map4]]}
+            output = {1:{'dense_flow': flow,
+                    'dense_certainty': uncertainty4}}
             return output
         return flow
     

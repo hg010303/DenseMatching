@@ -30,44 +30,9 @@ def make_scratch(in_shape, out_shape, groups=1, expand=False, args=None):
         out_shape3 = out_shape * 4
         out_shape4 = out_shape * 8
 
-    if args.cost_agg == 'hierarchical_cats':
-        scratch.layer1_rn = nn.Conv2d(
-            in_shape[0],
-            out_shape1,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            bias=False,
-            groups=groups,
-        )
-        scratch.layer2_rn = nn.Conv2d(
-            in_shape[1],
-            out_shape2,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            bias=False,
-            groups=groups,
-        )
-        scratch.layer3_rn = nn.Conv2d(
-            in_shape[2],
-            out_shape3,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            bias=False,
-            groups=groups,
-        )
-        scratch.layer4_rn = nn.Conv2d(
-            in_shape[3],
-            out_shape4,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            bias=False,
-            groups=groups,
-        )
-    elif args.cost_agg == 'hierarchical_residual_cats':
+  
+    
+    if args.cost_agg == 'hierarchical_residual_cats':
         scratch.layer1_rn = nn.Conv2d(
             in_shape[0],
             out_shape1,
@@ -104,6 +69,44 @@ def make_scratch(in_shape, out_shape, groups=1, expand=False, args=None):
             bias=False,
             groups=groups,
         )
+    else:
+        scratch.layer1_rn = nn.Conv2d(
+            in_shape[0],
+            out_shape1,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+            groups=groups,
+        )
+        scratch.layer2_rn = nn.Conv2d(
+            in_shape[1],
+            out_shape2,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+            groups=groups,
+        )
+        scratch.layer3_rn = nn.Conv2d(
+            in_shape[2],
+            out_shape3,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+            groups=groups,
+        )
+        scratch.layer4_rn = nn.Conv2d(
+            in_shape[3],
+            out_shape4,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+            groups=groups,
+        )
+        
     scratch.layer_rn = nn.ModuleList([
         scratch.layer1_rn,
         scratch.layer2_rn,
@@ -328,6 +331,7 @@ class HierarchicalCATs(nn.Module):
                  head_type: str = 'regression',
                  output_width_ratio=1,
                  args=None,
+                 conv4d_feature = 0,
                  **kwargs):
         super().__init__()
         self.num_channels = num_channels
@@ -340,9 +344,12 @@ class HierarchicalCATs(nn.Module):
         self.dim_tokens_enc = dim_tokens_enc * len(self.main_tasks) if dim_tokens_enc is not None else None
         self.head_type = head_type
         self.args=args
+        self.conv4d_feature = conv4d_feature
         # Actual patch height and width, taking into account stride of input
         self.P_H = max(1, self.patch_size[0] // stride_level)
         self.P_W = max(1, self.patch_size[1] // stride_level)
+        
+        feature_dim = feature_dim
 
         self.scratch = make_scratch(layer_dims, feature_dim, groups=1, expand=False, args=args)
         
@@ -354,28 +361,28 @@ class HierarchicalCATs(nn.Module):
         # The "DPTDepthModel" head
         self.head4 = nn.Sequential(
             nn.Conv2d(feature_dim, feature_dim // 2, kernel_size=3, stride=1, padding=1),
-            # Interpolate(scale_factor=2, mode="bilinear", align_corners=True),
+            Interpolate(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(feature_dim // 2, last_dim, kernel_size=3, stride=1, padding=1),
             nn.ReLU(True),
             nn.Conv2d(last_dim, self.num_channels, kernel_size=1, stride=1, padding=0)
         )
         self.head3 = nn.Sequential(
             nn.Conv2d(feature_dim, feature_dim // 2, kernel_size=3, stride=1, padding=1),
-            # Interpolate(scale_factor=2, mode="bilinear", align_corners=True),
+            Interpolate(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(feature_dim // 2, last_dim, kernel_size=3, stride=1, padding=1),
             nn.ReLU(True),
             nn.Conv2d(last_dim, self.num_channels, kernel_size=1, stride=1, padding=0)
         )
         self.head2 = nn.Sequential(
             nn.Conv2d(feature_dim, feature_dim // 2, kernel_size=3, stride=1, padding=1),
-            # Interpolate(scale_factor=2, mode="bilinear", align_corners=True),
+            Interpolate(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(feature_dim // 2, last_dim, kernel_size=3, stride=1, padding=1),
             nn.ReLU(True),
             nn.Conv2d(last_dim, self.num_channels, kernel_size=1, stride=1, padding=0)
         )
         self.head1 = nn.Sequential(
             nn.Conv2d(feature_dim, feature_dim // 2, kernel_size=3, stride=1, padding=1),
-            # Interpolate(scale_factor=2, mode="bilinear", align_corners=True),
+            Interpolate(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(feature_dim // 2, last_dim, kernel_size=3, stride=1, padding=1),
             nn.ReLU(True),
             nn.Conv2d(last_dim, self.num_channels, kernel_size=1, stride=1, padding=0)
@@ -435,19 +442,32 @@ class HierarchicalCATs(nn.Module):
             )
         )
 
-            
-        self.act_4_postprocess = nn.Sequential(
-            nn.Conv2d(
-                in_channels=self.dim_tokens_enc[3],
-                out_channels=self.layer_dims[3],
-                kernel_size=1, stride=1, padding=0,
-            ),
-            nn.Conv2d(
-                in_channels=self.layer_dims[3],
-                out_channels=self.layer_dims[3],
-                kernel_size=3, stride=2, padding=1,
+        if self.args.cost_agg == 'hierarchical_conv4d_cats':
+            self.act_4_postprocess = nn.Sequential(
+                nn.Conv2d(
+                    in_channels=self.dim_tokens_enc[3] + self.conv4d_feature,
+                    out_channels=self.layer_dims[3],
+                    kernel_size=1, stride=1, padding=0,
+                ),
+                nn.Conv2d(
+                    in_channels=self.layer_dims[3],
+                    out_channels=self.layer_dims[3],
+                    kernel_size=3, stride=2, padding=1,
+                )
             )
-        )
+        else:
+            self.act_4_postprocess = nn.Sequential(
+                nn.Conv2d(
+                    in_channels=self.dim_tokens_enc[3],
+                    out_channels=self.layer_dims[3],
+                    kernel_size=1, stride=1, padding=0,
+                ),
+                nn.Conv2d(
+                    in_channels=self.layer_dims[3],
+                    out_channels=self.layer_dims[3],
+                    kernel_size=3, stride=2, padding=1,
+                )
+            )
 
         self.act_postprocess = nn.ModuleList([
             self.act_1_postprocess,
@@ -483,7 +503,7 @@ class HierarchicalCATs(nn.Module):
             # Reshape tokens to spatial representation
             layers = [rearrange(l, 'b (nh nw) c -> b c nh nw', nh=N_H, nw=N_W) for l in layers]
 
-            layers = [self.act_postprocess[idx](torch.cat((l,c),dim=1)) for idx, l,c in enumerate(zip(layers, coarse_flows))]
+            layers = [self.act_postprocess[idx](torch.cat((l,c),dim=1)) for idx, (l,c) in enumerate(zip(layers, coarse_flows))]
             # Project layers to chosen feature dim
             layers = [self.scratch.layer_rn[idx](l) for idx, l in enumerate(layers)]
 
@@ -501,6 +521,74 @@ class HierarchicalCATs(nn.Module):
             out = [out2, out3, out4]
 
             return out
+
+        elif self.args.cost_agg == 'hierarchical_conv4d_cats':
+            # Reshape tokens to spatial representation
+            layers = [rearrange(l, 'b (nh nw) c -> b c nh nw', nh=N_H, nw=N_W) for l in layers]
+            coarse_flow = torch.cat((coarse_flows[0], coarse_flows[1], coarse_flows[2]),dim=1)
+            layers[-1] = torch.cat([layers[-1], coarse_flow], dim=1)
+            layers = [self.act_postprocess[idx+1](l) for idx, l in enumerate(layers)]
+            # Project layers to chosen feature dim
+            layers = [self.scratch.layer_rn[idx+1](l) for idx, l in enumerate(layers)]
+
+            # Fuse layers using refinement stages
+            path_4 = self.scratch.refinenet4(layers[-1])
+            path_3 = self.scratch.refinenet3(path_4, layers[-2])
+            path_2 = self.scratch.refinenet2(path_3, layers[-3])
+            
+            out4 = self.head4(path_4)
+            out3 = self.head3(path_3)
+            out2 = self.head2(path_2)
+            # out1 = self.head1(path_1)
+
+            # out = [out1, out2, out3, out4]
+            out = [out2, out3, out4]
+            return out
+        
+        elif self.args.cost_agg == 'hierarchical_conv4d_cats_level':
+            # Reshape tokens to spatial representation
+            layers = [rearrange(l, 'b (nh nw) c -> b c nh nw', nh=N_H, nw=N_W) for l in layers]
+            layers = [self.act_postprocess[idx+1](torch.cat((l,c),dim=1)) for idx, (l,c) in enumerate(zip(layers, coarse_flows))]
+            # Project layers to chosen feature dim
+            layers = [self.scratch.layer_rn[idx+1](l) for idx, l in enumerate(layers)]
+
+            # Fuse layers using refinement stages
+            path_4 = self.scratch.refinenet4(layers[-1])
+            path_3 = self.scratch.refinenet3(path_4, layers[-2])
+            path_2 = self.scratch.refinenet2(path_3, layers[-3])
+            
+            out4 = self.head4(path_4)
+            out3 = self.head3(path_3)
+            out2 = self.head2(path_2)
+            # out1 = self.head1(path_1)
+
+            # out = [out1, out2, out3, out4]
+            out = [out2, out3, out4]
+            return out
+        
+        elif self.args.cost_agg == 'hierarchical_conv4d_cats_level_4stage':
+            # Reshape tokens to spatial representation
+            layers = [rearrange(l, 'b (nh nw) c -> b c nh nw', nh=N_H, nw=N_W) for l in layers]
+            layers = [self.act_postprocess[idx](torch.cat((l,c),dim=1)) for idx, (l,c) in enumerate(zip(layers, coarse_flows))]
+            # Project layers to chosen feature dim
+            layers = [self.scratch.layer_rn[idx](l) for idx, l in enumerate(layers)]
+
+            # Fuse layers using refinement stages
+            path_4 = self.scratch.refinenet4(layers[-1])
+            path_3 = self.scratch.refinenet3(path_4, layers[-2])
+            path_2 = self.scratch.refinenet2(path_3, layers[-3])
+            path_1 = self.scratch.refinenet1(path_2, layers[-4])
+            
+            out4 = self.head4(path_4)
+            out3 = self.head3(path_3)
+            out2 = self.head2(path_2)
+            out1 = self.head1(path_1)
+            
+
+            out = [out1, out2, out3, out4]
+            # out = [out2, out3, out4]
+            return out
+            
 
         else:
             layers = [rearrange(l, 'b (nh nw) c -> b c nh nw', nh=N_H, nw=N_W) for l in layers]

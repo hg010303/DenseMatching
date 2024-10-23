@@ -351,12 +351,12 @@ class CrocoBasedActor(BaseActor):
             # loss_o, stats_o = self.objective(output_net_original, mini_batch['flow_map'], mask=mask)
             
         else:
-            
             loss_o, stats_o = self.objective(output_net_original, mini_batch['flow_map'], mask=mask)
 
             if self.net.cost_agg == 'CRAFT' and self.net.reciprocity:
                 loss_rev_o, stats_rev_o = self.objective(output_net_rev, mini_batch['flow_map'], mask=mask)
                 loss_o = loss_o + loss_rev_o
+                
         
         
         # loss_256, stats_256 = self.objective_256(output_net_256, mini_batch['flow_map_256'], mask=mini_batch['mask_256'])

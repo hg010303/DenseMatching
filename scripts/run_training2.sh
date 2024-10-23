@@ -1,8 +1,8 @@
 #!/bin/bash
-CUDA=2,3
+CUDA=0
 
-CUDA_VISIBLE_DEVICES=${CUDA} python run_training.py 'croco' 'train_croco_static_cats_multigpu' \
- --tag hierarchical_cats_aggregatesloss \
+CUDA_VISIBLE_DEVICES=${CUDA} python run_training.py 'croco' 'train_croco_static_cats' \
+ --tag hierarchical_cats_aggregatesloss_freeze_decfeat \
  --softmaxattn \
  --reciprocity \
  --cost_agg hierarchical_cats \

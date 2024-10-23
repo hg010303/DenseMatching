@@ -73,14 +73,23 @@ def run(settings, args=None):
     model = CroCoNet(**croco_args)
     model.load_state_dict(ckpt['model'], strict=False)
     
-    if args.cost_agg == 'cats':
-        for key,value in model.named_parameters():
-            if 'cats' not in key:
-                value.requires_grad = False
-    elif args.cost_agg == 'CRAFT':
-        for key,value in model.named_parameters():
-            if 'craft' not in key:
-                value.requires_grad = False
+    if not args.not_freeze:
+        if args.cost_agg == 'cats':
+            for key,value in model.named_parameters():
+                if 'cats' not in key:
+                    value.requires_grad = False
+        elif args.cost_agg == 'CRAFT':
+            for key,value in model.named_parameters():
+                if 'craft' not in key:
+                    value.requires_grad = False
+        elif args.cost_agg == 'hierarchical_cats' or args.cost_agg == 'hierarchical_residual_cats' or args.cost_agg == 'hierarchical_conv4d_cats' or args.cost_agg == 'hierarchical_conv4d_cats_level'or args.cost_agg == 'hierarchical_conv4d_cats_level_4stage':
+            for key,value in model.named_parameters():
+                if 'cats' not in key:
+                    value.requires_grad = False
+        elif args.cost_agg == 'croco_flow':
+            for key,value in model.named_parameters():
+                if 'head' not in key:
+                    value.requires_grad = False
             
     # but better results are obtained with using simple bilinear interpolation instead of deconvolutions.
     print(colored('==> ', 'blue') + 'model created.')
@@ -96,21 +105,27 @@ def run(settings, args=None):
     weights_level_loss = [0.32, 0.08, 0.02, 0.01]
     
     if args.uncertainty:
+        objective = NLLMixtureLaplace()
+        weights_level_loss = [0.32, 0.08, 0.02, 0.01]
+        loss_module_256 = MultiScaleMixtureDensity(level_weights=[0.32], loss_function=objective,
+                                        downsample_gt_flow=True)
+        loss_module = MultiScaleFlow(level_weights=[0.32], loss_function=objective, downsample_gt_flow=True)
+    elif args.hierarchical:
+        objective = EPE()
+        if args.cost_agg == 'hierarchical_cats' or args.cost_agg == 'hierarchical_conv4d_cats' or args.cost_agg == 'hierarchical_residual_cats' or args.cost_agg == 'hierarchical_conv4d_cats_level':
+            weights_level_loss = [0.32, 0.32, 0.32, 0.32,0.32,0.32]
+        elif args.cost_agg == 'hierarchical_conv4d_cats_level_4stage':
+            weights_level_loss = [0.32, 0.16, 0.08, 0.04, 0.02, 0.02, 0.02, 0.02] if args.hierarchical_weights else [0.32] * 8
+
+        loss_module_256 = MultiScaleFlow(level_weights=weights_level_loss[:2], loss_function=objective,
+                                    downsample_gt_flow=True)
+        loss_module = MultiScaleFlow(level_weights=weights_level_loss, loss_function=objective, downsample_gt_flow=True)
+    else:
         objective = EPE()
         weights_level_loss = [0.32, 0.08, 0.02, 0.01]
         loss_module_256 = MultiScaleFlow(level_weights=weights_level_loss[:2], loss_function=objective,
-                                        downsample_gt_flow=True)
-        # loss_module = MultiScaleFlow(level_weights=weights_level_loss[2:], loss_function=objective, downsample_gt_flow=True)
-    elif args.hierarchical:
-        if args.cost_agg == 'hierarchical_cats':
-            weights_level_loss = [0.32, 0.32, 0.32, 0.32,0.32,0.32]
-        loss_module = MultiScaleFlow(level_weights=weights_level_loss, loss_function=objective, downsample_gt_flow=True)
-    else:
-        objective = NLLMixtureLaplace()
-        weights_level_loss = [0.32, 0.08, 0.02, 0.01]
-        # loss_module_256 = MultiScaleMixtureDensity(level_weights=weights_level_loss[:2], loss_function=objective,
-                                                # downsample_gt_flow=True)
-        loss_module = MultiScaleMixtureDensity(level_weights=weights_level_loss[0.32], loss_function=objective,
+                                                downsample_gt_flow=True)
+        loss_module = MultiScaleFlow(level_weights=[0.32], loss_function=objective,
                                             downsample_gt_flow=True)
 
     # 6. Define actor

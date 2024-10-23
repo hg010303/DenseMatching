@@ -83,7 +83,7 @@ class MultiScaleFlow:
             else:
                 mask_used = mask
             level_loss = weight * self.one_scale(flow, gt_flow, mask=mask_used)
-            stats['loss_reso_{}x{}/loss_level'.format(h, w)] = level_loss.item()
+            stats['loss_reso_{}/loss_level'.format(i)] = level_loss.item()
             loss += level_loss
         return loss, stats
 
