@@ -15,16 +15,115 @@ import torchvision.models as models
 from models.croco.mod import FeatureL2Norm, unnormalise_and_convert_mapping_to_flow
 from models.croco.SCOT.rhm_map import rhm
 from models.croco.SCOT.geometry import gaussian2d, center, receptive_fields
+from einops import rearrange, repeat
+from timm.layers import to_2tuple
 
 ## uncertainty
-from models.PDCNet.mod_uncertainty import MixtureDensityEstimatorFromCorr, MixtureDensityEstimatorFromUncertaintiesAndFlow
-from models.croco.conv4d_coponerf import Conv4d
 
 
 r'''
 Modified timm library Vision Transformer implementation
 https://github.com/rwightman/pytorch-image-models
 '''
+
+def window_partition(x, window_size: int):
+    """
+    Args:
+        x: (B, H, W, C)
+        window_size (int): window size
+
+    Returns:
+        windows: (num_windows*B, window_size, window_size, C)
+    """
+    B, H, W, C = x.shape
+    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
+    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
+    return windows
+
+
+def window_reverse(windows, window_size: int, H: int, W: int):
+    """
+    Args:
+        windows: (num_windows*B, window_size, window_size, C)
+        window_size (int): Window size
+        H (int): Height of image
+        W (int): Width of image
+
+    Returns:
+        x: (B, H, W, C)
+    """
+    B = int(windows.shape[0] / (H * W / window_size / window_size))
+    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
+    return x
+
+
+
+class WindowAttention(nn.Module):
+    r""" Window based multi-head self attention (W-MSA) module with relative position bias.
+    It supports both of shifted and non-shifted window.
+
+    Args:
+        dim (int): Number of input channels.
+        num_heads (int): Number of attention heads.
+        head_dim (int): Number of channels per head (dim // num_heads if not set)
+        window_size (tuple[int]): The height and width of the window.
+        qkv_bias (bool, optional):  If True, add a learnable bias to query, key, value. Default: True
+        attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
+        proj_drop (float, optional): Dropout ratio of output. Default: 0.0
+    """
+
+    def __init__(self, dim, appearance_guidance_dim, num_heads, head_dim=None, window_size=7, qkv_bias=True, attn_drop=0., proj_drop=0.):
+
+        super().__init__()
+        self.dim = dim
+        self.window_size = to_2tuple(window_size)  # Wh, Ww
+        win_h, win_w = self.window_size
+        self.window_area = win_h * win_w
+        self.num_heads = num_heads
+        head_dim = head_dim or dim // num_heads
+        attn_dim = head_dim * num_heads
+        self.scale = head_dim ** -0.5
+
+        self.q = nn.Linear(dim + appearance_guidance_dim, attn_dim, bias=qkv_bias)
+        self.k = nn.Linear(dim + appearance_guidance_dim, attn_dim, bias=qkv_bias)
+        self.v = nn.Linear(dim, attn_dim, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(attn_dim, dim + appearance_guidance_dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x, mask=None):
+        """
+        Args:
+            x: input features with shape of (num_windows*B, N, C)
+            mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
+        """
+        B_, N, C = x.shape
+        
+        q = self.q(x).reshape(B_, N, self.num_heads, -1).permute(0, 2, 1, 3)
+        k = self.k(x).reshape(B_, N, self.num_heads, -1).permute(0, 2, 1, 3)
+        v = self.v(x[:, :, :self.dim]).reshape(B_, N, self.num_heads, -1).permute(0, 2, 1, 3)
+
+        q = q * self.scale
+        attn = (q @ k.transpose(-2, -1))
+
+        if mask is not None:
+            num_win = mask.shape[0]
+            attn = attn.view(B_ // num_win, num_win, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(-1, self.num_heads, N, N)
+            attn = self.softmax(attn)
+        else:
+            attn = self.softmax(attn)
+
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B_, N, -1)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -70,25 +169,148 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
         return x
 
+class SwinTransformerBlock(nn.Module):
+    r""" Swin Transformer Block.
+
+    Args:
+        dim (int): Number of input channels.
+        input_resolution (tuple[int]): Input resulotion.
+        window_size (int): Window size.
+        num_heads (int): Number of attention heads.
+        head_dim (int): Enforce the number of channels per head
+        shift_size (int): Shift size for SW-MSA.
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
+        qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
+        drop (float, optional): Dropout rate. Default: 0.0
+        attn_drop (float, optional): Attention dropout rate. Default: 0.0
+        drop_path (float, optional): Stochastic depth rate. Default: 0.0
+        act_layer (nn.Module, optional): Activation layer. Default: nn.GELU
+        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
+    """
+
+    def __init__(
+            self, dim, appearance_guidance_dim, input_resolution, num_heads=4, head_dim=None, window_size=7, shift_size=0,
+            mlp_ratio=4., qkv_bias=True, drop=0., attn_drop=0., drop_path=0., qk_scale=None,
+            act_layer=nn.GELU, norm_layer=nn.LayerNorm, num_hyperpixel=13):
+        super().__init__()
+        self.dim = dim
+        self.input_resolution = input_resolution
+        self.window_size = window_size
+        self.shift_size = shift_size
+        self.mlp_ratio = mlp_ratio
+        if min(self.input_resolution) <= self.window_size:
+            # if window size is larger than input resolution, we don't partition windows
+            self.shift_size = 0
+            self.window_size = min(self.input_resolution)
+        assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
+
+        self.norm1 = norm_layer(dim+appearance_guidance_dim)
+        self.attn = WindowAttention(
+            dim, appearance_guidance_dim=appearance_guidance_dim, num_heads=num_heads, head_dim=head_dim, window_size=to_2tuple(self.window_size),
+            qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
+    
+
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim+appearance_guidance_dim)
+        self.norm3 = norm_layer(dim)
+        
+        self.mlp = Mlp(in_features=dim+appearance_guidance_dim, hidden_features=int((dim+appearance_guidance_dim) * mlp_ratio), act_layer=act_layer, drop=drop)
+        
+        self.num_hyperpixel = num_hyperpixel
+
+        if self.shift_size > 0:
+            # calculate attention mask for SW-MSA
+            H, W = self.input_resolution
+            img_mask = torch.zeros((1, H, W, 1))  # 1 H W 1
+            cnt = 0
+            for h in (
+                    slice(0, -self.window_size),
+                    slice(-self.window_size, -self.shift_size),
+                    slice(-self.shift_size, None)):
+                for w in (
+                        slice(0, -self.window_size),
+                        slice(-self.window_size, -self.shift_size),
+                        slice(-self.shift_size, None)):
+                    img_mask[:, h, w, :] = cnt
+                    cnt += 1
+            mask_windows = window_partition(img_mask, self.window_size)  # num_win, window_size, window_size, 1
+            mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
+            attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+            attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
+        else:
+            attn_mask = None
+
+        self.register_buffer("attn_mask", attn_mask)
+
+    def forward(self, x):
+        H, W = self.input_resolution
+        B, L, C = x.shape
+        assert L == H * W, "input feature has wrong size"
+
+        shortcut = x
+        x = self.norm1(x)
+        x = x.view(B, H, W, C)
+        
+        # if appearance_guidance is not None:
+        #     D = appearance_guidance.shape[-1]
+        #     appearance_guidance = appearance_guidance.view(B, H, W, -1)
+        #     x = torch.cat([x, appearance_guidance], dim=-1)
+        #     shortcut=x
+        # cyclic shift
+        if self.shift_size > 0:
+            shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
+        else:
+            shifted_x = x
+
+        # partition windows
+        x_windows = window_partition(shifted_x, self.window_size)  # num_win*B, window_size, window_size, C
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, x_windows.shape[-1])  # num_win*B, window_size*window_size, C
+
+        # W-MSA/SW-MSA
+        attn_windows = self.attn(x_windows, mask=self.attn_mask)  # num_win*B, window_size*window_size, C
+
+        # merge windows
+        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
+        shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
+
+        # reverse cyclic shift
+        if self.shift_size > 0:
+            x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
+        else:
+            x = shifted_x
+        x = x.view(B, H * W, C)
+        # FFN
+        x = shortcut + self.drop_path(x)
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+
+        return x
+
 
 class MultiscaleBlock(nn.Module):
 
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+    def __init__(self, dim, embed_dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, img_size=14, num_hyperpixel=13):
         super().__init__()
-        self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        # self.attn = Attention(
+        #     dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        self.block_1 = SwinTransformerBlock(dim, embed_dim, (img_size,img_size), num_heads=num_heads, head_dim=None, window_size=7, shift_size=0, num_hyperpixel=num_hyperpixel)
+        self.block_2 = SwinTransformerBlock(dim, embed_dim, (img_size,img_size), num_heads=num_heads, head_dim=None, window_size=7, shift_size=7 // 2, num_hyperpixel=num_hyperpixel)
+        
         self.attn_multiscale = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+            dim+embed_dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        self.attn_multiscale2 = Attention(
+            dim+embed_dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.norm1 = norm_layer(dim)
-        self.norm2 = norm_layer(dim)
-        self.norm3 = norm_layer(dim)
-        self.norm4 = norm_layer(dim)
+        self.norm1 = norm_layer(dim+embed_dim)
+        self.norm2 = norm_layer(dim+embed_dim)
+        self.norm3 = norm_layer(dim+embed_dim)
+        self.norm4 = norm_layer(dim+embed_dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
-        self.mlp2 = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp = Mlp(in_features=dim+embed_dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp2 = Mlp(in_features=dim+embed_dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        
+        
 
     def forward(self, x):
         '''
@@ -100,37 +322,51 @@ class MultiscaleBlock(nn.Module):
             x = x + self.drop_path(self.attn(self.norm1(x)))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x.view(B, N, H, W)
+        
         x = x.flatten(0, 1)
-        x = x + self.drop_path(self.attn(self.norm1(x)))
-        x = x + self.drop_path(self.mlp2(self.norm4(x)))
-        x = x.view(B, N, H, W).transpose(1, 2).flatten(0, 1) 
-        x = x + self.drop_path(self.attn_multiscale(self.norm3(x)))
-        x = x.view(B, H, N, W).transpose(1, 2).flatten(0, 1)
+        x = self.block_1(x)
+        
+        x = x.view(B, N, H, -1).transpose(1, 2).flatten(0, 1) 
+        x = x + self.drop_path(self.attn_multiscale(self.norm1(x)))
+        x = x.view(B, H, N, -1).transpose(1, 2).flatten(0, 1)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
-        x = x.view(B, N, H, W)
+        x = x.view(B, N, H, -1)
+        
+        
+        
+        x = x.flatten(0, 1)        
+        
+        x = self.block_2(x)
+        x = x.view(B, N, H, -1).transpose(1, 2).flatten(0, 1) 
+        x = x + self.drop_path(self.attn_multiscale2(self.norm3(x)))
+        x = x.view(B, H, N, -1).transpose(1, 2).flatten(0, 1)
+        x = x + self.drop_path(self.mlp2(self.norm4(x)))
+        x = x.view(B, N, H, -1)
+        
+
         return x
 
 
 class TransformerAggregator(nn.Module):
-    def __init__(self, num_hyperpixel, img_size=224, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None,
+    def __init__(self, num_hyperpixel, dim, img_size=224, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., norm_layer=None):
         super().__init__()
         self.img_size = img_size
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
 
-        self.pos_embed_x = nn.Parameter(torch.zeros(1, num_hyperpixel, 1, img_size, embed_dim // 2))
-        self.pos_embed_y = nn.Parameter(torch.zeros(1, num_hyperpixel, img_size, 1, embed_dim // 2))
+        self.pos_embed_x = nn.Parameter(torch.zeros(1, num_hyperpixel, 1, img_size, (embed_dim+dim) // 2))
+        self.pos_embed_y = nn.Parameter(torch.zeros(1, num_hyperpixel, img_size, 1, (embed_dim+dim) // 2))
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.Sequential(*[
             MultiscaleBlock(
-                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
-            for i in range(depth)])
-        self.proj = nn.Linear(embed_dim, img_size ** 2)
+                dim=dim, embed_dim = embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, img_size=img_size, num_hyperpixel=num_hyperpixel)
+            for i in range(2)])
+        self.proj = nn.Linear(embed_dim+dim, img_size ** 2)
         self.norm = norm_layer(embed_dim)
 
         trunc_normal_(self.pos_embed_x, std=.02)
@@ -147,78 +383,21 @@ class TransformerAggregator(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, attn_maps, source):
+    def forward(self, attn_maps, source_feat):
         B = attn_maps.shape[0]
         x = attn_maps.clone()
         
         pos_embed = torch.cat((self.pos_embed_x.repeat(1, 1, self.img_size, 1, 1), self.pos_embed_y.repeat(1, 1, 1, self.img_size, 1)), dim=4)
         pos_embed = pos_embed.flatten(2, 3)
-        # x = torch.cat((x.transpose(-1, -2), target), dim=3) + pos_embed
-        # x = self.proj(self.blocks(x)).transpose(-1, -2) + corr  # swapping the axis for swapping self-attention.
-        x = torch.cat((x, source), dim=3) + pos_embed
-        x = self.proj(self.blocks(x)) + attn_maps 
+        x = torch.cat((x, source_feat), dim=3) + pos_embed
+        x = self.blocks(x)
+        
+        x = self.proj(x) + attn_maps 
 
         return x.mean(1)
 
 
-class FeatureExtractionHyperPixel(nn.Module):
-    def __init__(self, hyperpixel_ids, feature_size, freeze=True):
-        super().__init__()
-        # self.backbone = resnet.resnet101(pretrained=True)
-        self.feature_size = feature_size
-        if freeze:
-            for param in self.backbone.parameters():
-                param.requires_grad = False
-        nbottlenecks = [3, 4, 23, 3]
-        self.bottleneck_ids = reduce(add, list(map(lambda x: list(range(x)), nbottlenecks)))
-        self.layer_ids = reduce(add, [[i + 1] * x for i, x in enumerate(nbottlenecks)])
-        self.hyperpixel_ids = hyperpixel_ids
-    
-    
-    def forward(self, img):
-        r"""Extract desired a list of intermediate features"""
-
-        feats = []
-
-        # Layer 0
-        feat = self.backbone.conv1.forward(img)
-        feat = self.backbone.bn1.forward(feat)
-        feat = self.backbone.relu.forward(feat)
-        feat = self.backbone.maxpool.forward(feat)
-        if 0 in self.hyperpixel_ids:
-            feats.append(feat.clone())
-
-        # Layer 1-4
-        for hid, (bid, lid) in enumerate(zip(self.bottleneck_ids, self.layer_ids)):
-            res = feat
-            feat = self.backbone.__getattr__('layer%d' % lid)[bid].conv1.forward(feat)
-            feat = self.backbone.__getattr__('layer%d' % lid)[bid].bn1.forward(feat)
-            feat = self.backbone.__getattr__('layer%d' % lid)[bid].relu.forward(feat)
-            feat = self.backbone.__getattr__('layer%d' % lid)[bid].conv2.forward(feat)
-            feat = self.backbone.__getattr__('layer%d' % lid)[bid].bn2.forward(feat)
-            feat = self.backbone.__getattr__('layer%d' % lid)[bid].relu.forward(feat)
-            feat = self.backbone.__getattr__('layer%d' % lid)[bid].conv3.forward(feat)
-            feat = self.backbone.__getattr__('layer%d' % lid)[bid].bn3.forward(feat)
-
-            if bid == 0:
-                res = self.backbone.__getattr__('layer%d' % lid)[bid].downsample.forward(res)
-
-            feat += res
-
-            if hid + 1 in self.hyperpixel_ids:
-                feats.append(feat.clone())
-                #if hid + 1 == max(self.hyperpixel_ids):
-                #    break
-            feat = self.backbone.__getattr__('layer%d' % lid)[bid].relu.forward(feat)
-
-        # Up-sample & concatenate features to construct a hyperimage
-        for idx, feat in enumerate(feats):
-            feats[idx] = F.interpolate(feat, self.feature_size, None, 'bilinear', True)
-
-        return feats
-
-
-class CATs(nn.Module):
+class CATs_SWIN(nn.Module):
     def __init__(self,
     feature_size=16,
     feature_proj_dim=128,
@@ -228,55 +407,22 @@ class CATs(nn.Module):
     hyperpixel_ids=[0,8,20,21,26,28,29,30],
     output_interp=False,
     cost_transformer=True,
-    args=None,
-    conv4d=False,):
+    args=None,):
         super().__init__()
         self.feature_size = feature_size
         self.feature_proj_dim = feature_proj_dim
-        self.decoder_embed_dim = self.feature_size ** 2 + self.feature_proj_dim
+        self.decoder_embed_dim = self.feature_size + self.feature_proj_dim
         self.cost_transformer=cost_transformer
         self.args=args
         self.correlation = getattr(args,'correlation',False)
         self.reciprocity = getattr(args,'reciprocity',False)
         self.occlusion_mask = getattr(args,'occlusion_mask',False)
-        self.uncertainty = getattr(args,'uncertainty',False)
-        self.give_layer_before_flow_to_uncertainty_decoder = True
-        self.conv4d = conv4d
 
-        if self.args.cost_agg == 'hierarchical_cats' or self.args.cost_agg == 'hierarchical_residual_cats' or self.args.cost_agg == 'hierarchical_conv4d_cats' or self.args.cost_agg == 'hierarchical_conv4d_cats_level': #or self.args.cost_agg == 'hierarchical_conv4d_cats_level_4stage':
-            channels = [1024]*12
-        else:
-            channels = [768]*12
+        channels = [768]*12
         if self.correlation:
             channels = [1024]+channels
             hyperpixel_ids = hyperpixel_ids + [12]
             
-        if self.uncertainty:
-            self.corr_uncertainty_decoder4 = MixtureDensityEstimatorFromCorr(in_channels=1,
-                                                                         batch_norm=True,
-                                                                         search_size=14, output_channels=6,
-                                                                         output_all_channels_together=True)
-
-            if self.give_layer_before_flow_to_uncertainty_decoder:
-                uncertainty_input_channels = 6 + 196
-            else:
-                uncertainty_input_channels = 6 + 2
-            self.uncertainty_decoder4 = MixtureDensityEstimatorFromUncertaintiesAndFlow(in_channels=uncertainty_input_channels,
-                                                                                        batch_norm=True,
-                                                                                        output_channels=3)
-            
-        if self.conv4d:
-            self.conv4d_seq = nn.Sequential(
-                Conv4d(in_channels=1, out_channels=16, kernel_size=[3,3,3,3], stride=[1,1,2,2], padding=[1,1,1,1]),
-                nn.GroupNorm(4,16),
-                nn.ReLU(),
-                Conv4d(in_channels=16, out_channels=64, kernel_size=[3,3,3,3], stride=[1,1,2,2], padding=[1,1,1,1]),
-                nn.GroupNorm(4,64),
-                nn.ReLU(),
-                Conv4d(in_channels=64, out_channels=128, kernel_size=[3,3,3,3], stride=[1,1,2,2], padding=[1,1,1,1]),
-                nn.GroupNorm(4,128),
-                nn.ReLU(),
-                )
 
 
 
@@ -290,7 +436,7 @@ class CATs(nn.Module):
         ])
 
         self.decoder = TransformerAggregator(
-            img_size=self.feature_size, embed_dim=self.decoder_embed_dim, depth=depth, num_heads=num_heads,
+            img_size=self.feature_size, dim = self.feature_size**2, embed_dim=self.feature_proj_dim, depth=depth, num_heads=num_heads,
             mlp_ratio=mlp_ratio, qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6),
             num_hyperpixel=len(hyperpixel_ids))
             
@@ -342,39 +488,6 @@ class CATs(nn.Module):
     
     def corr(self, src, trg):
         return src.flatten(2).transpose(-1, -2) @ trg.flatten(2)
-    
-    def estimate_uncertainty_components(self, corr_uncertainty_module, uncertainty_predictor,
-                                        corr_type, corr, c_target, c_source, flow, up_previous_flow=None,
-                                        up_previous_uncertainty=None, global_local='global_corr'):
-        # corr uncertainty decoder
-        x_second_corr = None
-        if 'gocor' in corr_type.lower():
-            if self.corr_for_corr_uncertainty_decoder == 'gocor':
-                input_corr_uncertainty_dec = corr
-            elif self.corr_for_corr_uncertainty_decoder == 'corr':
-                input_corr_uncertainty_dec = getattr(self, global_local)(c_target, c_source)
-
-            elif self.corr_for_corr_uncertainty_decoder == 'corr_and_gocor':
-                input_corr_uncertainty_dec = getattr(self, global_local)(c_target, c_source)
-                x_second_corr = corr
-            else:
-                raise NotImplementedError
-        else:
-            input_corr_uncertainty_dec = corr
-
-        input_corr_uncertainty_dec = input_corr_uncertainty_dec.transpose(-1, -2).reshape(input_corr_uncertainty_dec.size(0), -1, self.feature_size, self.feature_size)
-        corr_uncertainty = corr_uncertainty_module(input_corr_uncertainty_dec, x_second_corr=x_second_corr)
-
-        flow = flow.transpose(-1, -2).reshape(flow.size(0), -1, self.feature_size, self.feature_size)
-        # final uncertainty decoder
-        if up_previous_flow is not None and up_previous_uncertainty is not None:
-            input_uncertainty = torch.cat((corr_uncertainty, flow,
-                                           up_previous_uncertainty, up_previous_flow), 1)
-        else:
-            input_uncertainty = torch.cat((corr_uncertainty, flow), 1)
-
-        large_log_var_map, weight_map = uncertainty_predictor(input_uncertainty)
-        return large_log_var_map, weight_map
     
     @staticmethod
     def constrain_large_log_var_map(var_min, var_max, large_log_var_map):
@@ -444,19 +557,7 @@ class CATs(nn.Module):
             refined_corr_target = refined_corr
             refined_corr = (refined_corr + refined_corr_source.transpose(-1,-2)) / 2
             
-        if self.uncertainty:
-            uncertainty4 = self.estimate_uncertainty_components(self.corr_uncertainty_decoder4,
-                                                                        self.uncertainty_decoder4,
-                                                                        'corr',
-                                                                        attn_maps[:,0], None, None, refined_corr,
-                                                                        global_local='use_global_corr_layer')
-            # large_log_var_map4 = self.constrain_large_log_var_map(torch.tensor(2.0), torch.tensor(0.0), large_log_var_map4)
-            # small_log_var_map4 = torch.ones_like(large_log_var_map4, requires_grad=False) * torch.log(torch.tensor(1.0))
-            # log_var_map4 = torch.cat((small_log_var_map4, large_log_var_map4), 1)
-            
-            # log_var_map4 = F.interpolate(log_var_map4, size=output_shape, mode='bilinear', align_corners=False)
-            uncertainty4 = F.interpolate(uncertainty4, size=output_shape, mode='bilinear', align_corners=False)
-            
+
         
         if not self.cost_transformer:
             refined_corr = attn_maps.mean(dim=1) ## target source
@@ -478,41 +579,6 @@ class CATs(nn.Module):
             flow[:, 0] *= float(output_shape[1]) / float(w)
             flow[:, 1] *= float(output_shape[0]) / float(h)
 
-        if self.occlusion_mask:
-            grid_x_target, grid_y_target = self.soft_argmax(refined_corr_target.transpose(-1,-2).view(B, -1, self.feature_size, self.feature_size),beta=2e-2)
-            flow_target = torch.cat((grid_x_target, grid_y_target), dim=1)
-            flow_target = unnormalise_and_convert_mapping_to_flow(flow_target)
-            if self.output_interp:
-                flow_target = F.interpolate(flow_target, size=output_shape, mode='bilinear', align_corners=False)
-                flow_target[:, 0] *= float(output_shape[1]) / float(w)
-                flow_target[:, 1] *= float(output_shape[0]) / float(h)
-            
-            # grid_x_source, grid_y_source = self.soft_argmax(refined_corr_source.transpose(-1,-2).view(B, -1, self.feature_size, self.feature_size),beta=2e-2)
-            grid_x_source, grid_y_source = self.soft_argmax(refined_corr_source.view(B, -1, self.feature_size, self.feature_size),beta=2e-2)
-            
-            flow_source = torch.cat((grid_x_source, grid_y_source), dim=1)
-            flow_source = unnormalise_and_convert_mapping_to_flow(flow_source)
-            if self.output_interp:
-                flow_source = F.interpolate(flow_source, size=output_shape, mode='bilinear', align_corners=False)
-                flow_source[:, 0] *= float(output_shape[1]) / float(w)
-                flow_source[:, 1] *= float(output_shape[0]) / float(h)
-            
-            return flow, flow_target,flow_source
-        
-        if self.conv4d:
-            PH, PW = output_shape[0]//16, output_shape[1]//16
-            refined_corr = refined_corr.view(B,PH, PW, PH, PW).unsqueeze(dim=1)
-            refined_corr = self.conv4d_seq(refined_corr)
-            bsz, ch, ha, wa, hb, wb = refined_corr.size()
-            refined_corr = refined_corr.view(bsz, ch, ha, wa, -1).mean(dim=-1)
-            
-            return flow, refined_corr
-
-        if self.uncertainty:
-            
-            output = {1:{'dense_flow': flow,
-                    'dense_certainty': uncertainty4}}
-            return output
         return flow
     
     def get_FCN_map(self, img, feat_map, fc, sz):

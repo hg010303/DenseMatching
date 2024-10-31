@@ -28,9 +28,9 @@ def run(settings, args=None):
     settings.batch_size = args.batch_size #24
     settings.n_threads = 8
     settings.multi_gpu = True
-    settings.print_interval = 100
+    settings.print_interval = 10
     settings.lr = 0.0001 if args.lr == None else args.lr
-    settings.scheduler_steps = [100, 120, 130]
+    settings.scheduler_steps = [30,60,100, 130]
     settings.n_epochs = 150
     
     # 1. Define training and validation datasets
@@ -39,21 +39,52 @@ def run(settings, args=None):
     flow_transform = transforms.Compose([ArrayToTensor()])  # just put channels first and put it to float
     co_transform = None
 
-    train_dataset, _ = PreMadeDataset(root=settings.env.training_cad_520,
-                                      source_image_transform=img_transforms,
-                                      target_image_transform=img_transforms,
-                                      flow_transform=flow_transform,
-                                      co_transform=co_transform,
-                                      split=1,
-                                      get_mapping=False, img_size=(224,224))
+    # geometric transformation for moving objects
+    fg_tform = RandomAffine(p_flip=0.0, max_rotation=30.0,
+                            max_shear=0, max_ar_factor=0.,
+                            max_scale=0.3, pad_amount=0)
 
-    # validation dataset
+    # object dataset
+    min_target_area = 1300
+    coco_dataset_train = MSCOCO(root=settings.env.coco, split='train', version='2014',
+                                min_area=min_target_area)
+
+    train_dataset, _ = PreMadeDataset(root=settings.env.training_cad_520,
+                                      source_image_transform=None,
+                                      target_image_transform=None,
+                                      flow_transform=None,
+                                      co_transform=None,
+                                      split=1)  # only training
+    
+    # we then adds the object on the dataset
+    train_dataset = AugmentedImagePairsDatasetMultipleObjects(foreground_image_dataset=coco_dataset_train,
+                                                              background_image_dataset=train_dataset,
+                                                              foreground_transform=fg_tform,
+                                                              number_of_objects=1, object_proba=0.8,
+                                                              source_image_transform=img_transforms,
+                                                              target_image_transform=img_transforms,
+                                                              flow_transform=flow_transform,
+                                                              co_transform=co_transform,
+                                                              image_size=(224,224)
+                                                              )
+
+    # validation dataset: DPED-CityScape-ADE + 1 object from COCO
     _, val_dataset = PreMadeDataset(root=settings.env.validation_cad_520,
-                                    source_image_transform=img_transforms,
-                                    target_image_transform=img_transforms,
-                                    flow_transform=flow_transform,
-                                    co_transform=co_transform,
-                                    split=0, img_size=(224,224))
+                                    source_image_transform=None,
+                                    target_image_transform=None,
+                                    flow_transform=None,
+                                    co_transform=None,
+                                    split=0)
+    
+    val_dataset = AugmentedImagePairsDatasetMultipleObjects(foreground_image_dataset=coco_dataset_train,
+                                                            background_image_dataset=val_dataset,
+                                                            number_of_objects=1, object_proba=0.8,
+                                                            foreground_transform=fg_tform,
+                                                            source_image_transform=img_transforms,
+                                                            target_image_transform=img_transforms,
+                                                            flow_transform=flow_transform,
+                                                            co_transform=co_transform,
+                                                            image_size=(224,224))
 
     # 2. Define dataloaders
     train_loader = Loader('train', train_dataset, batch_size=settings.batch_size, shuffle=True,
@@ -124,10 +155,15 @@ def run(settings, args=None):
         loss_module = MultiScaleFlow(level_weights=weights_level_loss, loss_function=objective, downsample_gt_flow=True)
     else:
         objective = EPE()
-        weights_level_loss = [0.32, 0.08, 0.02, 0.01]
-        loss_module_256 = MultiScaleFlow(level_weights=weights_level_loss[:2], loss_function=objective,
+        
+        if args.cost_agg == 'cats_swin_decoder':
+            weights_level_loss = [0.32, 0.32]
+        else:
+            weights_level_loss = [0.32]
+    
+        loss_module_256 = MultiScaleFlow(level_weights=[0.32, 0.08], loss_function=objective,
                                                 downsample_gt_flow=True)
-        loss_module = MultiScaleFlow(level_weights=[0.32], loss_function=objective,
+        loss_module = MultiScaleFlow(level_weights=weights_level_loss, loss_function=objective,
                                             downsample_gt_flow=True)
 
     # 6. Define actor

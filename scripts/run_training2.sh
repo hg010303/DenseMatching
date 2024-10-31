@@ -1,11 +1,11 @@
 #!/bin/bash
-CUDA=0
+CUDA=0,1,2,3
 
-CUDA_VISIBLE_DEVICES=${CUDA} python run_training.py 'croco' 'train_croco_static_cats' \
- --tag hierarchical_cats_aggregatesloss_freeze_decfeat \
+CUDA_VISIBLE_DEVICES=${CUDA} python run_training.py 'croco' 'train_croco_dynamic_cats_multigpu' \
+ --tag cats_swin_decoder_224224 \
  --softmaxattn \
  --reciprocity \
- --cost_agg hierarchical_cats \
+ --cost_agg cats_swin_decoder \
  --cost_transformer \
  --correlation \
- --hierarchical
+ --batch_size 32

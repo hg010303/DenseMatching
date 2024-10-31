@@ -502,8 +502,8 @@ def run_evaluation_generic(network, test_dataloader, device, estimate_uncertaint
         # flow_est = F.interpolate(flow_est[0], size=(H_32, W_32), mode='bilinear', align_corners=False).to(device)
         # flow_est[:,0,:,:] *= W_32/W_est
         # flow_est[:,1,:,:] *= H_32/H_est
-        flow_pred = flow_est.clone()
-        flow_gt2 = flow_gt.clone()
+        # flow_pred = flow_est.clone()
+        # flow_gt2 = flow_gt.clone()
 
         flow_est = flow_est.permute(0, 2, 3, 1)[mask_valid]
         flow_gt = flow_gt.permute(0, 2, 3, 1)[mask_valid]

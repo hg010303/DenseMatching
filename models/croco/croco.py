@@ -17,6 +17,9 @@ from models.croco.blocks import Block, DecoderBlock, PatchEmbed
 from models.croco.pos_embed import get_2d_sincos_pos_embed, RoPE2D 
 from models.croco.masking import RandomMask
 from models.croco.simple_cats import CATs
+from models.croco.cats_swin import CATs_SWIN
+from models.croco.cats_swin_decoder import CATs_SWIN_Decoder
+
 from .craft import CRAFT
 from .mod import FeatureL2Norm, unnormalise_and_convert_mapping_to_flow
 from einops import rearrange, repeat
@@ -92,13 +95,16 @@ class CroCoNet(nn.Module):
             self.hierarchical_cats = HierarchicalCATs(dim_tokens_enc = dim_tokens_enc, hooks = [0,1,2,], args=args, conv4d_feature = 128*3)
             
         elif self.cost_agg=='hierarchical_conv4d_cats_level_4stage':
-            self.cats1 = CATs(feature_size=(img_size[0]//16), hyperpixel_ids = [i for i in range(0, 3)], output_interp=False, cost_transformer=self.cost_transformer, args=args,depth=1, conv4d=True)
-            self.cats2 = CATs(feature_size=(img_size[0]//16), hyperpixel_ids = [i for i in range(0, 3)], output_interp=False, cost_transformer=self.cost_transformer, args=args,depth=1, conv4d=True)
-            self.cats3 = CATs(feature_size=(img_size[0]//16), hyperpixel_ids = [i for i in range(0, 3)], output_interp=False, cost_transformer=self.cost_transformer, args=args,depth=1, conv4d=True)
-            self.cats4 = CATs(feature_size=(img_size[0]//16), hyperpixel_ids = [i for i in range(0, 3)], output_interp=False, cost_transformer=self.cost_transformer, args=args,depth=1, conv4d=True)
+            self.cats = CATs(feature_size=(img_size[0]//16), hyperpixel_ids = [i for i in range(0, 12)], output_interp=False, cost_transformer=self.cost_transformer, args=args,depth=4, conv4d=True)
             
-            dim_tokens_enc = 768 if self.cost_agg=='hierarchical_conv4d_cats' else 768 + 128
-            self.hierarchical_cats = HierarchicalCATs(dim_tokens_enc = dim_tokens_enc, hooks = [0,1,2,3], args=args, conv4d_feature = 128*3)
+            dim_tokens_enc = 768
+            self.hierarchical_cats = HierarchicalCATs(dim_tokens_enc = dim_tokens_enc, hooks = [0,1,2,3], args=args, conv4d_feature = 128, depth=args.cats_depth)
+            
+        elif self.cost_agg=='cats_swin':
+            self.cats_swin = CATs_SWIN(feature_size=(img_size[0]//16), hyperpixel_ids = [i for i in range(0, 12)], output_interp=output_interp, cost_transformer=self.cost_transformer, args=args,depth=cats_depth)
+            
+        elif self.cost_agg=='cats_swin_decoder':
+            self.cats_swin_decoder = CATs_SWIN_Decoder(feature_size=(img_size[0]//16), hyperpixel_ids = [i for i in range(0, 12)], output_interp=output_interp, cost_transformer=self.cost_transformer, args=args,depth=cats_depth)
             
             
         elif self.cost_agg == 'croco_flow':
@@ -399,6 +405,30 @@ class CroCoNet(nn.Module):
             
             return out
         
+        elif self.cost_agg == 'cats_swin':
+            decfeat = [feat.detach() for feat in decfeat]
+            if self.reciprocity:
+                decfeat_source = [feat.detach() for feat in decfeat_source]
+                
+                out = self.cats_swin(attn_map, decfeat, (H,W), feat_source, feat_target, attn_map_source, decfeat_source, img_target, img_source)
+                
+            else:
+                out = self.cats_swin(attn_map, decfeat, (H,W), feat_source, feat_target)
+            
+            return out
+        
+        elif self.cost_agg == 'cats_swin_decoder':
+            decfeat = [feat.detach() for feat in decfeat]
+            if self.reciprocity:
+                decfeat_source = [feat.detach() for feat in decfeat_source]
+                
+                out = self.cats_swin_decoder(attn_map, decfeat, (H,W), feat_source, feat_target, attn_map_source, decfeat_source, img_target, img_source, appearance_feature = [feat_targets[8],feat_targets[16]])
+                
+            else:
+                out = self.cats_swin_decoder(attn_map, decfeat, (H,W), feat_source, feat_target, appearance_feature = [feat_targets[8],feat_targets[16]])
+            
+            return out
+        
         elif self.cost_agg == 'hierarchical_cats' or self.cost_agg == 'hierarchical_residual_cats':
             assert self.reciprocity, "reciprocity must be True for hierarchical_cats"
             encfeat_targets = [feat for feat in feat_targets]
@@ -436,23 +466,26 @@ class CroCoNet(nn.Module):
             encfeat_targets = [feat.detach() for feat in feat_targets]
             encfeat_sources = [feat.detach() for feat in feat_sources]
                         
-            aggregates_flow1, conv4d_feature1 = self.cats4(attn_map[0:3], encfeat_targets[0:6:2], (H,W), feat_source, feat_target, attn_map_source[0:3], encfeat_sources[0:6:2])
-            aggregates_flow2, conv4d_feature2 = self.cats3(attn_map[3:6], encfeat_targets[6:12:2], (H,W), feat_source, feat_target, attn_map_source[3:6], encfeat_sources[6:12:2])
-            aggregates_flow3, conv4d_feature3 = self.cats2(attn_map[6:9], encfeat_targets[12:18:2], (H,W), feat_source, feat_target, attn_map_source[6:9], encfeat_sources[12:18:2])            
-            aggregates_flow4, conv4d_feature4 = self.cats1(attn_map[9:12], encfeat_targets[18:24:2], (H,W), feat_source, feat_target, attn_map_source[9:12], encfeat_sources[18:24:2])            
+            # aggregates_flow1, conv4d_feature1 = self.cats4(attn_map[0:3], encfeat_targets[0:6:2], (H,W), feat_source, feat_target, attn_map_source[0:3], encfeat_sources[0:6:2])
+            # aggregates_flow2, conv4d_feature2 = self.cats3(attn_map[3:6], encfeat_targets[6:12:2], (H,W), feat_source, feat_target, attn_map_source[3:6], encfeat_sources[6:12:2])
+            # aggregates_flow3, conv4d_feature3 = self.cats2(attn_map[6:9], encfeat_targets[12:18:2], (H,W), feat_source, feat_target, attn_map_source[6:9], encfeat_sources[12:18:2])            
+            # aggregates_flow4, conv4d_feature4 = self.cats1(attn_map[9:12], encfeat_targets[18:24:2], (H,W), feat_source, feat_target, attn_map_source[9:12], encfeat_sources[18:24:2])            
             
-            aggregates_flows = [conv4d_feature1, conv4d_feature2, conv4d_feature3,conv4d_feature4]
+            aggregates_flow, conv4d_feature = self.cats(attn_map, decfeat, (H,W), feat_source, feat_target, attn_map_source, decfeat_source)
+            
+            
+            aggregates_flows = [conv4d_feature]
             enc_feats = [decfeat[2], decfeat[5], decfeat[8], decfeat[11]]
             
             outputs = self.hierarchical_cats(enc_feats,aggregates_flows, (H,W))
-            outputs = outputs + [aggregates_flow1, aggregates_flow2, aggregates_flow3,aggregates_flow4]
+            outputs = outputs + [aggregates_flow]
             
             if self.output_interp:
                 for i in range(len(outputs)):
                     H_output, W_output = outputs[i].shape[-2:]
                     outputs[i] = F.interpolate(outputs[i], size=(H,W), mode='bilinear', align_corners=False)
-                    outputs[i][:,0] = outputs[i][:,0] * (W_output/W)
-                    outputs[i][:,1] = outputs[i][:,1] * (H_output/H)      
+                    outputs[i][:,0] = outputs[i][:,0] * (W/W_output)
+                    outputs[i][:,1] = outputs[i][:,1] * (H/H_output)    
                                 
             return outputs
         

@@ -1,11 +1,12 @@
 #!/bin/bash
-CUDA=2,3
+CUDA=0
 
-CUDA_VISIBLE_DEVICES=${CUDA} python run_training.py 'croco' 'train_croco_static_cats_multigpu' \
- --tag hierarchical_conv4d_cats_level_4stage \
+CUDA_VISIBLE_DEVICES=${CUDA} python run_training.py 'croco' 'train_croco_dynamic_cats_multigpu' \
+ --tag cats_224224_freeze \
  --softmaxattn \
  --reciprocity \
- --cost_agg hierarchical_conv4d_cats_level_4stage \
+ --cost_agg cats \
  --cost_transformer \
  --correlation \
- --hierarchical
+ --batch_size 16
+ 

@@ -442,7 +442,7 @@ class HierarchicalCATs(nn.Module):
             )
         )
 
-        if self.args.cost_agg == 'hierarchical_conv4d_cats':
+        if self.args.cost_agg == 'hierarchical_conv4d_cats' or self.args.cost_agg == 'hierarchical_conv4d_cats_level_4stage':
             self.act_4_postprocess = nn.Sequential(
                 nn.Conv2d(
                     in_channels=self.dim_tokens_enc[3] + self.conv4d_feature,
@@ -494,7 +494,9 @@ class HierarchicalCATs(nn.Module):
 
         # Hook decoder onto 4 layers from specified ViT layers
         layers = [encoder_tokens[hook] for hook in self.hooks]
-        coarse_flows = [coarse_flows[hook] for hook in self.hooks]
+        
+        if not self.args.cost_agg == 'hierarchical_conv4d_cats_level_4stage':
+            coarse_flows = [coarse_flows[hook] for hook in self.hooks]
 
         # Extract only task-relevant tokens and ignore global tokens.
         layers = [self.adapt_tokens(l) for l in layers]
@@ -569,7 +571,9 @@ class HierarchicalCATs(nn.Module):
         elif self.args.cost_agg == 'hierarchical_conv4d_cats_level_4stage':
             # Reshape tokens to spatial representation
             layers = [rearrange(l, 'b (nh nw) c -> b c nh nw', nh=N_H, nw=N_W) for l in layers]
-            layers = [self.act_postprocess[idx](torch.cat((l,c),dim=1)) for idx, (l,c) in enumerate(zip(layers, coarse_flows))]
+            coarse_flow = coarse_flows[0]
+            layers[-1] = torch.cat([layers[-1], coarse_flow], dim=1)
+            layers = [self.act_postprocess[idx](l) for idx, l in enumerate(layers)]
             # Project layers to chosen feature dim
             layers = [self.scratch.layer_rn[idx](l) for idx, l in enumerate(layers)]
 

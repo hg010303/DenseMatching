@@ -27,7 +27,7 @@ from training.losses.multiscale_loss import MultiScaleMixtureDensity
 def run(settings, args=None):
     settings.description = 'Default train settings for GLU-Net on the dynamic dataset (from GOCor paper)'
     settings.data_mode = 'local'
-    settings.batch_size = 16 #24
+    settings.batch_size = args.batch_size #24
     settings.n_threads = 8
     settings.multi_gpu = False
     settings.print_interval = 100
@@ -115,8 +115,7 @@ def run(settings, args=None):
         if args.cost_agg == 'hierarchical_cats' or args.cost_agg == 'hierarchical_conv4d_cats' or args.cost_agg == 'hierarchical_residual_cats' or args.cost_agg == 'hierarchical_conv4d_cats_level':
             weights_level_loss = [0.32, 0.32, 0.32, 0.32,0.32,0.32]
         elif args.cost_agg == 'hierarchical_conv4d_cats_level_4stage':
-            weights_level_loss = [0.32, 0.16, 0.08, 0.04, 0.02, 0.02, 0.02, 0.02] if args.hierarchical_weights else [0.32] * 8
-
+            weights_level_loss = [0.32, 0.16, 0.08, 0.04, 0.02] if args.hierarchical_weights else [0.32] * 5
         loss_module_256 = MultiScaleFlow(level_weights=weights_level_loss[:2], loss_function=objective,
                                     downsample_gt_flow=True)
         loss_module = MultiScaleFlow(level_weights=weights_level_loss, loss_function=objective, downsample_gt_flow=True)
