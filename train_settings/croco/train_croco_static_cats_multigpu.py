@@ -124,10 +124,14 @@ def run(settings, args=None):
         loss_module = MultiScaleFlow(level_weights=weights_level_loss, loss_function=objective, downsample_gt_flow=True)
     else:
         objective = EPE()
-        weights_level_loss = [0.32, 0.08, 0.02, 0.01]
-        loss_module_256 = MultiScaleFlow(level_weights=weights_level_loss[:2], loss_function=objective,
+        if args.cost_agg == 'cats_swin_decoder':
+            weights_level_loss = [0.32, 0.32]
+        else:
+            weights_level_loss = [0.32]
+    
+        loss_module_256 = MultiScaleFlow(level_weights=[0.32, 0.08], loss_function=objective,
                                                 downsample_gt_flow=True)
-        loss_module = MultiScaleFlow(level_weights=[0.32], loss_function=objective,
+        loss_module = MultiScaleFlow(level_weights=weights_level_loss, loss_function=objective,
                                             downsample_gt_flow=True)
 
     # 6. Define actor

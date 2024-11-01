@@ -394,7 +394,7 @@ class TransformerAggregator(nn.Module):
         
         x = self.proj(x) + attn_maps 
 
-        return x.mean(1)
+        return x
     
 class DoubleConv(nn.Module):
     """(convolution => [GN] => ReLU) * 2"""
@@ -418,11 +418,13 @@ class DoubleConv(nn.Module):
 class Up(nn.Module):
     """Upscaling then double conv"""
 
-    def __init__(self, in_channels, out_channels, guidance_channels):
+    def __init__(self, in_channels, out_channels, guidance_channels, intermediate_dim= None):
         super().__init__()
 
-        self.up = nn.ConvTranspose2d(in_channels, in_channels - guidance_channels, kernel_size=2, stride=2)
-        self.conv = DoubleConv(in_channels, out_channels)
+        intermediate_dim = intermediate_dim or in_channels
+        
+        self.up = nn.ConvTranspose2d(in_channels, intermediate_dim , kernel_size=2, stride=2)
+        self.conv = DoubleConv(intermediate_dim + guidance_channels, out_channels)
 
     def forward(self, x, guidance=None):
         x = self.up(x)
@@ -498,9 +500,9 @@ class CATs_SWIN_Decoder(nn.Module):
                 nn.ReLU(),
             ) for d, dp in zip(decoder_guidance_dims, decoder_guidance_proj_dims)
         ])
-        self.decoder1 = Up(self.feature_size**2, decoder_dims[0], decoder_guidance_proj_dims[0])
-        self.decoder2 = Up(decoder_dims[0], decoder_dims[1], decoder_guidance_proj_dims[1])
-        self.head = nn.Conv2d(decoder_dims[1], 2, kernel_size=3, stride=1, padding=1)
+        self.decoder1 = Up(len(hyperpixel_ids), decoder_dims[0], decoder_guidance_proj_dims[0], intermediate_dim=16)
+        self.decoder2 = Up(decoder_dims[0], decoder_dims[1], decoder_guidance_proj_dims[1], intermediate_dim=32)
+        self.head = nn.Conv2d(decoder_dims[1], 1, kernel_size=3, stride=1, padding=1)
         
         
         self.output_interp = output_interp
@@ -530,6 +532,27 @@ class CATs_SWIN_Decoder(nn.Module):
         grid_y = (grid_y*y_normal).sum(dim=1, keepdim=True) # b x 1 x h x w
         return grid_x, grid_y
     
+    def soft_argmax_asymmetric(self, corr, source_resolution, beta=0.02):
+        b, _, h_t, w_t = corr.size()
+        h_s, w_s = source_resolution
+
+        # 소프트맥스 적용 (소스 픽셀 차원에 대해)
+        corr = self.softmax_with_temperature(corr, beta=beta, d=1)  # corr: (b, h_s*w_s, h_t, w_t)
+
+        # 소스 좌표 생성
+        x_s_normal = self.x_normal[:w_s]  # (w_s,)
+        y_s_normal = self.y_normal[:h_s]  # (h_s,)
+
+        grid_x_s_coords, grid_y_s_coords = torch.meshgrid(y_s_normal, x_s_normal, indexing='ij')  # (h_s, w_s)
+        grid_x_s_coords = grid_x_s_coords.reshape(1, h_s * w_s, 1, 1).to(corr.device)  # (1, h_s*w_s, 1, 1)
+        grid_y_s_coords = grid_y_s_coords.reshape(1, h_s * w_s, 1, 1).to(corr.device)  # (1, h_s*w_s, 1, 1)
+
+        # 기대 소스 좌표 계산 (각 타겟 픽셀에 대해)
+        expected_x_s = (corr * grid_x_s_coords).sum(dim=1, keepdim=True)  # (b, 1, h_t, w_t)
+        expected_y_s = (corr * grid_y_s_coords).sum(dim=1, keepdim=True)  # (b, 1, h_t, w_t)
+
+        return expected_x_s, expected_y_s
+        
     def mutual_nn_filter(self, correlation_matrix):
         r"""Mutual nearest neighbor filtering (Rocco et al. NeurIPS'18)"""
         corr_src_max = torch.max(correlation_matrix, dim=3, keepdim=True)[0]
@@ -570,11 +593,16 @@ class CATs_SWIN_Decoder(nn.Module):
         return large_log_var_map
     
     def conv_decoder(self, x, guidance):
-        B = x.shape[0]
+        B, C, T, S = x.shape
         corr_embed = x
-        corr_embed = self.decoder1(corr_embed, guidance[0])
+        
+        corr_embed = rearrange(corr_embed, 'b c (th tw) s -> (b s) c th tw', th=self.feature_size, tw=self.feature_size)
+
+        
+        corr_embed = self.decoder1(corr_embed, guidance[0])        
         corr_embed = self.decoder2(corr_embed, guidance[1])
         corr_embed = self.head(corr_embed)
+        corr_embed = rearrange(corr_embed, '(b s) () th tw -> (b) s th tw', s=S)
         return corr_embed
 
     def forward(self, attn_maps, tgt_feats,output_shape, feat_source, feat_target, attn_maps_source=None, src_feats=None, tgt_img = None, src_img = None, appearance_feature = None):
@@ -606,7 +634,8 @@ class CATs_SWIN_Decoder(nn.Module):
         tgt_feats = torch.stack(tgt_feats_proj, dim=1)
         attn_maps = torch.stack(attn_maps, dim=1)
         # attn_maps = self.mutual_nn_filter(attn_maps)
-        refined_corr = self.decoder(attn_maps, tgt_feats)
+        refined_layered_corr = self.decoder(attn_maps, tgt_feats)
+        refined_corr = refined_layered_corr.mean(dim=1)
         
         if self.args.reverse:
             src_feats = torch.stack(src_feats_proj, dim=1)
@@ -617,19 +646,19 @@ class CATs_SWIN_Decoder(nn.Module):
         elif self.reciprocity:
             src_feats = torch.stack(src_feats_proj, dim=1)
             attn_maps_source = torch.stack(attn_maps_source, dim=1)
-            refined_corr_source = self.decoder(attn_maps_source, src_feats)
+            refined_layered_corr_source = self.decoder(attn_maps_source, src_feats)
+            refined_corr_source = refined_layered_corr_source.mean(dim=1)
             refined_corr_target = refined_corr
-            refined_corr = (refined_corr + refined_corr_source.transpose(-1,-2)) / 2
             
-
+            refined_layered_corr = (refined_layered_corr + refined_layered_corr_source.transpose(-1,-2)) / 2
+            
+            refined_corr = (refined_corr + refined_corr_source.transpose(-1,-2)) / 2
         
         if not self.cost_transformer:
             refined_corr = attn_maps.mean(dim=1) ## target source
             # refined_corr = (attn_maps.mean(dim=1) + attn_maps_source.mean(dim=1).transpose(-1,-2))/2.
             # refined_corr = self.corr(self.l2norm(feat_target.permute(0,2,1)),self.l2norm(feat_source.permute(0,2,1)))
             
-
-
 
         grid_x, grid_y = self.soft_argmax(refined_corr.transpose(-1,-2).view(B, -1, self.feature_size, self.feature_size),beta=2e-2)
         self.grid_x = grid_x
@@ -651,13 +680,26 @@ class CATs_SWIN_Decoder(nn.Module):
 
         
         projected_decoder_guidance = [proj(guidance) for proj, guidance in zip(self.decoder_guidance_projection, upsampled_appearance_feature)]
-        upsampled_corr = self.conv_decoder(refined_corr, projected_decoder_guidance)
         
-        up_h, up_w = upsampled_corr.shape[-2:]
+        upsampled_corr = self.conv_decoder(refined_layered_corr, projected_decoder_guidance)
         
-        fine_flow = F.interpolate(upsampled_corr, size=output_shape, mode='bilinear', align_corners=False)
-        fine_flow[:, 0] *= float(output_shape[1]) #/ float(up_w)
-        fine_flow[:, 1] *= float(output_shape[0]) #/ float(up_h)
+        fine_gridx, fine_gridy = self.soft_argmax_asymmetric(upsampled_corr, (self.feature_size, self.feature_size),beta=2e-2)
+        
+        fine_flow = torch.cat((fine_gridx, fine_gridy), dim=1)
+        fine_flow = unnormalise_and_convert_mapping_to_flow(fine_flow)
+        h, w = fine_flow.shape[-2:]
+        if self.output_interp:
+            fine_flow = F.interpolate(fine_flow, size=output_shape, mode='bilinear', align_corners=False)
+            fine_flow[:, 0] *= float(output_shape[1]) / float(w)
+            fine_flow[:, 1] *= float(output_shape[0]) / float(h)
+
+        
+        
+        # up_h, up_w = upsampled_corr.shape[-2:]
+        
+        # fine_flow = F.interpolate(upsampled_corr, size=output_shape, mode='bilinear', align_corners=False)
+        # fine_flow[:, 0] *= float(output_shape[1]) #/ float(up_w)
+        # fine_flow[:, 1] *= float(output_shape[0]) #/ float(up_h)
 
         return [fine_flow, coarse_flow]
     
